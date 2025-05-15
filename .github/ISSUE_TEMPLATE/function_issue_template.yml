@@ -1,0 +1,45 @@
+name: Function Request
+description: This is an issue to request a cloud function in supabase.
+assignees: maik205
+labels: feat
+projects: dorayakidevs/haivy
+body:
+- type: markdown
+  attributes:
+    value: "## Feature request"
+- type: dropdown
+  id: download
+  attributes:
+    label: Iteration Number
+    options:
+      - Iteration 0 - Core Infrastructure & Auth
+  validations:
+    required: true
+- type: input
+  id: name
+  attributes:
+    label: What is the feature called
+    description: "The name should be short and concise, describing the feature in the most general way."
+  validations:
+    required: true
+- type: textarea
+  id: purpose
+  attributes:
+    label: What does this feature do?
+    description: "Describe in detail what the fucntion accomplishes."
+  validations:
+    required: true
+- type: textarea
+  id: input
+  attributes:
+    label: What is the input parameters of this function?
+    description: "Describe the input parameters with a YAML or JSON like syntax."
+  validations:
+    required: true
+- type: textarea
+  id: output
+  attributes:
+    label: What is the output of this function?
+    description: "Describe the output parameters with a YAML or JSON like syntax."
+  validations:
+    required: true
