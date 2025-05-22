@@ -1,0 +1,6 @@
+
+[functions.create-ticket]
+enabled = true
+verify_jwt = true
+import_map = "./functions/create_ticket/deno.json"
+entrypoint = "./functions/create_ticket/index.ts"
