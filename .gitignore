@@ -7,4 +7,7 @@
 .env.local
 .env.*.local
 
+.env
+
+.vscode
 node-modules
