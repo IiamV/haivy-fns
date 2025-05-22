@@ -43,7 +43,7 @@ serve(async (req) => {
         }
       );
     }
-    const combinedContent = `${ticket_overview}\n${ticket_content}`;
+    
     const { data: staffList, error: staffError } = await supabase
       .from("staff")
       .select("staff_id")
@@ -101,13 +101,13 @@ serve(async (req) => {
       assigned_to: staffWithLeastTickets.staffId,
       date_created: currentDate,
       ticket_type: "appointment",
-      content: combinedContent,
+      content: ticket_content,
+      title: ticket_overview
     };
     console.log("Attempting to insert ticket with data:", JSON.stringify(ticketData, null, 2));
     let insertError = null;
     let insertedTicket = null;
     try {
-      console.log("Trying lowercase 'ticket' table name...");
       const result = await supabase
         .from("ticket")
         .insert(ticketData)
@@ -121,72 +121,7 @@ serve(async (req) => {
       console.log("Lowercase table name failed, trying uppercase...");
       insertError = err;
     }
-    if (insertError) {
-      try {
-        console.log("Trying uppercase 'Ticket' table name...");
-        const result = await supabase
-          .from("Ticket")
-          .insert(ticketData)
-          .select();
-        insertedTicket = result.data;
-        insertError = result.error;
-        if (!insertError) {
-          console.log("Success with uppercase table name!");
-        }
-      } catch (err) {
-        console.log("Both table names failed");
-        insertError = err;
-      }
-    }
-    if (insertError) {
-      console.error("Ticket insertion error occurred");
-      console.error("Error object:", insertError);
-      console.error("Error message:", insertError?.message);
-      console.error("Error details:", insertError?.details);
-      console.error("Error hint:", insertError?.hint);
-      console.error("Error code:", insertError?.code);
-      console.error("Full error JSON:", JSON.stringify(insertError, null, 2));
-      console.log("Attempting basic connectivity test...");
-      try {
-        const testResult = await supabase
-          .from("ticket")
-          .select("ticket_id")
-          .limit(1);
-        console.log("Basic select test result:", testResult);
-        if (testResult.error) {
-          console.log("Basic select failed - table might not exist or be accessible");
-          console.log("Select error:", JSON.stringify(testResult.error, null, 2));
-        }
-      } catch (testErr) {
-        console.log("Basic connectivity test failed:", testErr);
-      }
-      let errorMessage = "Error creating ticket";
-      if (insertError?.message) {
-        errorMessage += `: ${insertError.message}`;
-      }
-      if (insertError?.details) {
-        errorMessage += ` (Details: ${insertError.details})`;
-      }
-      if (insertError?.hint) {
-        errorMessage += ` (Hint: ${insertError.hint})`;
-      }
-      return new Response(
-        JSON.stringify({ 
-          error: errorMessage,
-          code: insertError?.code,
-          details: insertError?.details,
-          hint: insertError?.hint,
-          debugInfo: "Check server logs for detailed debugging information"
-        }),
-        {
-          status: 500,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-          },
-        }
-      );
-    }
+    
     console.log("Ticket inserted successfully:", insertedTicket);
     return new Response(
       JSON.stringify({
@@ -202,7 +137,7 @@ serve(async (req) => {
         },
       }
     );
-  } catch (error) {
+  } catch (error : any) {
     console.error("Unexpected error:", error);
     console.error("Error stack:", error?.stack);
     console.error("Error name:", error?.name);
