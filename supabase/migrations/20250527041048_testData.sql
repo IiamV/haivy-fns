@@ -1,6 +1,3 @@
--- Fixed Test Data Script for Supabase Local
--- This script creates test users in auth.users and populates all tables correctly
-
 DO $$
 DECLARE
     user_ids UUID[] := ARRAY[
@@ -14,8 +11,7 @@ DECLARE
     temp_patient_ids UUID[];
     temp_ticket_ids UUID[];
 BEGIN
-    -- Step 1: Insert test users into auth.users (if they don't exist)
-    -- Note: In production, users would be created through Supabase Auth
+    -- Step 1: Insert test users into auth.users
     INSERT INTO auth.users (
         id, 
         email, 
@@ -325,13 +321,5 @@ BEGIN
         'forward'::ticket_interaction_type,
         'Forwarded to lab technician',
         user_ids[3];
-
-    RAISE NOTICE 'Test data inserted successfully!';
-    RAISE NOTICE 'Created % users, % staff members, % patients, % tickets, % appointments', 
-        array_length(user_ids, 1), 
-        array_length(temp_staff_ids, 1), 
-        array_length(temp_patient_ids, 1), 
-        array_length(temp_ticket_ids, 1), 
-        (SELECT COUNT(*) FROM Appointment);
 
 END $$;
