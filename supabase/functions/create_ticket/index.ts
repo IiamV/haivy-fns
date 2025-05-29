@@ -2,6 +2,21 @@ import "https://deno.land/std@0.168.0/dotenv/load.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
+/*
+
+To test it locally
+
+  curl -L -X POST 'https://[LINK]]/functions/v1/[FUNCTION_NAME]' \
+    -H 'Authorization: Bearer [KEY]' \
+    -H 'Content-Type: application/json' \
+    --data '{"name":"value"}'
+
+To test it on the supabase web
+  go inside the edge function and there's a "Test" button on the upper right
+
+*/
+
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -74,16 +89,3 @@ serve(async (req)=>{
     }
   });
 }); 
-/*
-
-To test it locally
-
-  curl -L -X POST 'https://[LINK]]/functions/v1/[FUNCTION_NAME]' \
-    -H 'Authorization: Bearer [KEY]' \
-    -H 'Content-Type: application/json' \
-    --data '{"name":"value"}'
-
-To test it on the supabase web
-  go inside the edge function and there's a "Test" button on the upper right
-
-*/
