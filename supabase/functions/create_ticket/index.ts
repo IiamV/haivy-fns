@@ -83,4 +83,7 @@ To test it locally
     -H 'Content-Type: application/json' \
     --data '{"name":"value"}'
 
+To test it on the supabase web
+  go inside the edge function and there's a "Test" button on the upper right
+
 */
