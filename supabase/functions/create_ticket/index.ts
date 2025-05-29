@@ -54,15 +54,14 @@ serve(async (req)=>{
       "Content-Type": "application/json"
     }
   });
-}); /*
+}); 
+/*
 
 To test it locally
 
   curl -L -X POST 'https://[LINK]]/functions/v1/[FUNCTION_NAME]' \
-    -H 'Authorization: Bearer [ANON_KEY]' \
+    -H 'Authorization: Bearer [KEY]' \
     -H 'Content-Type: application/json' \
     --data '{"name":"value"}'
 
-*/  /*
-  curl -L -X POST 'http://127.0.0.1:54321/functions/v1/create_ticket' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBtamlxb290c3pxZGZ6b25wYnBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg0MTM4OTQsImV4cCI6MjA2Mzk4OTg5NH0.wXgLNEGuqMBEUUT6RApBO61RrJvf64Mr3-qUqG2R6nI' -H 'Content-Type: application/json' --data '{"ticket_sender": "system", "ticket_overview": "Confirm patient information", "ticket_content": "Overview: Confirm patient information\nDear Mr. Doe,\nPlease confirm patient Jane Don's following information, by phone at number +849012345678,\n- Service: HIV treatment advisory appointment\n- Time: July 01, 2025 - 15:00 \n- Doctor: <Any doctor would be OK>\nThank you,\nHaivy Limited Company."}'
-*/ 
+*/

@@ -405,133 +405,114 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function 12: updateTicketStatus
+-- Policy: Only assigned staff can update table ticket
+CREATE POLICY "staffUpdateTicket_policy" ON public.ticket
+FOR UPDATE 
+TO authenticated
+USING (
+    assigned_to IN (
+        SELECT staff_id 
+        FROM staff 
+        WHERE account_uid = auth.uid() 
+        AND status = true
+    )
+)
+WITH CHECK (
+    assigned_to IN (
+        SELECT staff_id 
+        FROM staff 
+        WHERE account_uid = auth.uid() 
+        AND status = true
+    )
+);
+
 CREATE OR REPLACE FUNCTION public.updateTicketStatus(
     ticket_id UUID,
     new_status tik_status
 )
-RETURNS VOID
-SECURITY DEFINER --allow any user to run this func
-AS $$
+RETURNS VOID AS $$
 DECLARE
-    current_user_id UUID;
-    assigned_staff_id UUID;
     current_status tik_status;
+    update_count INTEGER;
 BEGIN
-    -- Get current user ID
-    SELECT auth.uid() INTO current_user_id;
+    -- Get current status
+    SELECT status INTO current_status
+    FROM ticket 
+    WHERE ticket.ticket_id = updateTicketStatus.ticket_id;
     
-    -- Get the ticket assigned staff and current status
-    SELECT t.assigned_to, t.status
-    INTO assigned_staff_id, current_status
-    FROM ticket t
-    WHERE t.ticket_id = updateTicketStatus.ticket_id;
- 
-    
-    -- Check if the current user == assigned staff
-    IF NOT EXISTS (
-        SELECT 1 FROM staff s 
-        WHERE s.staff_id = assigned_staff_id 
-        AND s.account_uid = current_user_id
-        AND s.status = true
-    ) THEN
-        INSERT INTO ticket_interaction_history (ticket_id, action, note, by)
-        VALUES (
-            updateTicketStatus.ticket_id, 
-            'dismiss'::ticket_interaction_type, 
-            'Authorization denied',
-            current_user_id
-        );
-        RETURN;
-    END IF;
-    
-    -- Logs no changes
-    IF current_status = new_status THEN
-        INSERT INTO ticket_interaction_history (ticket_id, action, note)
-        VALUES (
-            updateTicketStatus.ticket_id, 
-            'comment'::ticket_interaction_type, 
-            'Status update but no change needed (already ' || current_status || ')'
-        );
-        RETURN;
-    END IF;
-    
-    -- Update the ticket status
+    -- Update ticket status
     UPDATE ticket 
     SET status = new_status 
     WHERE ticket.ticket_id = updateTicketStatus.ticket_id;
     
-    -- Log the change in interaction history
+    -- Logs the change
     INSERT INTO ticket_interaction_history (ticket_id, action, note, by)
     VALUES (
         updateTicketStatus.ticket_id, 
         'processed'::ticket_interaction_type,
         'Status changed from ' || current_status || ' to ' || new_status, 
-        current_user_id
+        auth.uid()
     );
-    
 END;
 $$ LANGUAGE plpgsql;
-GRANT EXECUTE ON FUNCTION public.updateTicketStatus(UUID, tik_status) TO authenticated;
 
-
--- Function 13: log_new_ticket
--- createAppointment Database Function that calls create_ticket edge function 
-CREATE OR REPLACE FUNCTION createAppointment(
+-- Function 13: createAppointment
+CREATE OR REPLACE FUNCTION public.createAppointment(
   p_duration INTEGER,
   p_meeting_date TIMESTAMPTZ,
   p_isPublic BOOLEAN,
   p_requested_doctor UUID,
   p_patient UUID
 )
-RETURNS UUID
-SECURITY DEFINER
-AS $$
+RETURNS UUID AS $$
 DECLARE
+  v_appointment_id UUID;
   v_ticket_content TEXT;
-  v_response TEXT;
-  v_supabase_url TEXT;
+  v_response JSONB;
+  v_supabase_url TEXT := 'https://ejfeybaktdorddskajzc.supabase.co';
 BEGIN
-  -- Insert appointment
-  INSERT INTO appointments (
+  -- Create ticket content with newlines
+  v_ticket_content := format(
+    'Overview: Confirm patient information\nPlease confirm patient following information, by phone at number +849012345678.\n- Service: HIV treatment advisory appointment\n- Time: %s\n- Doctor: <Any doctor would be OK>\nThank you\nHaivy Limited Company.',
+    to_char(p_meeting_date, 'Mon DD, YYYY - HH24:MI')
+  );
+
+  -- Call create_ticket edge function
+  SELECT content::jsonb INTO v_response
+  FROM http_post(
+    v_supabase_url || '/functions/v1/create_ticket',
+    jsonb_build_object(
+      'ticket_sender', 'system', --not being used by the edge function
+      'ticket_overview', 'Confirm patient information',
+      'ticket_content', v_ticket_content
+    )::text,
+    'application/json'
+  );
+
+  -- Insert appointment with ticket_id
+  INSERT INTO Appointment (
     duration,
     meeting_date,
     visibility,
     staff_id,
     patient_uid,
     status,
-    created_date
+    created_date,
+    ticket_id
   ) VALUES (
     p_duration,
     p_meeting_date,
     p_isPublic,
     p_requested_doctor,
     p_patient,
-    'pending'::appointment_status_enum,
-    NOW()
-  );
+    'pending'::apt_status,
+    NOW(),
+    (v_response->'data'->>'ticketId')::UUID
+  ) RETURNING appointment_id INTO v_appointment_id;
 
-  -- Create ticket content
-  v_ticket_content := format(
-    'Overview: Confirm patient information.\nPlease confirm patient following information, by phone at number +849012345678.\n-Service: HIV treatment advisory appointment.\n-Time: %s.\n-Doctor: <Any doctor would be OK>.\nThank you.\nHaivy Limited Company.', to_char(p_meeting_date, 'Mon DD, YYYY - HH24:MI')
-  );
-
-  -- Call create_ticket edge function
-  SELECT content INTO v_response
-  FROM http((
-    'POST',
-    v_supabase_url || '/functions/v1/create_ticket',
-    ARRAY[http_header('Content-Type', 'application/json')],
-    jsonb_build_object(
-      'ticket_sender', 'system',
-      'ticket_overview', 'Confirm patient information',
-      'ticket_content', v_ticket_content
-    )::text
-  )::http_request);
-
-  RETURN v_appointment_uid;
+  RETURN v_appointment_id;
 END;
 $$ LANGUAGE plpgsql;
-
 
 -- Function 14: log_new_ticket
 CREATE OR REPLACE FUNCTION public.log_new_ticket()
@@ -559,6 +540,40 @@ BEGIN
     );
 
     RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function 15: dismiss_ticket
+CREATE OR REPLACE FUNCTION public.dismiss_ticket(
+    ticket_id UUID,
+    note TEXT
+)
+RETURNS VOID AS $$
+DECLARE
+    current_user_id UUID;
+    ticket_exists BOOLEAN;
+BEGIN
+    -- Update the ticket status
+    UPDATE ticket 
+    SET status = 'canceled'::tik_status 
+    WHERE ticket.ticket_id = dismiss_ticket.ticket_id;
+    
+    -- Update related appointments
+    UPDATE appointment 
+    SET status = 'canceled'::apt_status 
+    WHERE appointment.ticket_id = dismiss_ticket.ticket_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function 16: forward_ticket_comment
+CREATE OR REPLACE FUNCTION public.forward_ticket(from_staff UUID, to_staff UUID, note TEXT)
+RETURNS VOID AS $$
+BEGIN
+    INSERT INTO public.ticket_interaction_history (ticket_id, action, note)
+    VALUES (ticket_id, 'forward', 'Forwarded from ' || from_staff || ' to ' || to_staff || '.\nComment: ' || note);
+    UPDATE public.ticket
+    SET assigned_to = to_staff
+    WHERE assigned_to = from_staff;
 END;
 $$ LANGUAGE plpgsql;
 

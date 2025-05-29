@@ -74,7 +74,7 @@ BEGIN
     (gen_random_uuid(), user_ids[3], 'manager'::staff_role, '2021-03-10', true),   -- Michael: manager
     (gen_random_uuid(), user_ids[4], 'doctor'::staff_role, '2023-07-05', true),    -- Emily: doctor
     (gen_random_uuid(), user_ids[5], 'admin'::staff_role, '2020-11-20', true);     -- William: admin
-    
+
     -- Get staff IDs for later use
     SELECT ARRAY(SELECT staff_id FROM Staff ORDER BY staff_id) INTO temp_staff_ids;
 
