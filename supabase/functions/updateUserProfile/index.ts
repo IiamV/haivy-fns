@@ -17,9 +17,9 @@ const IMAGE_CONFIG = {
 const STORAGE_CONFIG = {
   bucketName: 'profile-images',
   filePrefix: 'profile_',    // Prefix for auto-generated filenames
-  folderPath: '',            // Folder path in bucket (e.g., 'avatars/', 'users/profiles/')
-  deleteOldImage: true,      // Whether to delete old profile image when uploading new one
-  cleanupTempFiles: true     // Whether to delete temp files from ImageKit
+  folderPath: '',            // Folder path in bucket
+  deleteOldImage: true,      // Delete old profile image
+  cleanupTempFiles: true     // Delete temp files from ImageKit
 }
 
 // Database settings
@@ -68,7 +68,7 @@ function generateFileName(userId: string, originalName: string): string {
   return `${STORAGE_CONFIG.filePrefix}${userId}.${extension}`
 }
 
-// Fetches user details from database for getting current profile image
+// Get current profile image
 async function fetchUserDetails(supabaseClient: any, userId: string): Promise<any> {
   const { data, error } = await supabaseClient
     .from(DATABASE_CONFIG.tableName)
@@ -179,7 +179,7 @@ function extractFilenameFromUrl(url: string): string | null {
   }
 }
 
-// Deletes old profile image from Supabase Storage with better error handling
+// Deletes old profile image from Supabase Storage
 async function deleteOldProfileImage(supabaseClient: any, oldImageUrl: string | null, newFileName: string) {
   if (!STORAGE_CONFIG.deleteOldImage || !oldImageUrl) return
   
@@ -275,8 +275,8 @@ async function processImageInBackground(
       // Try optimized version first
       const optimizedUrl = createOptimizedTransformationUrl(imageKitResult.url, imageKitConfig.urlEndpoint)
       const optimizedBuffer = await fetchProcessedImage(optimizedUrl)
-      
-      // Only use optimized version if it's smaller than original
+
+      // Only use optimized version if smaller than original
       if (optimizedBuffer.byteLength < originalFileSize) {
         finalImageBuffer = optimizedBuffer
         wasOptimized = true
@@ -396,7 +396,7 @@ serve(async (req) => {
       return createErrorResponse(`Invalid file type. Only ${IMAGE_CONFIG.allowedTypes.join(', ')} are allowed.`, 400)
     }
 
-    // Get ImageKit configuration early to validate it
+    // Get ImageKit configuration
     const imageKitConfig = getImageKitConfig()
     if (!imageKitConfig) {
       return createErrorResponse('ImageKit configuration missing', 500)
@@ -408,7 +408,7 @@ serve(async (req) => {
     // Generate filename
     const fileName = generateFileName(user.id, imageFile.name)
 
-    // Return success response immediately - processing will continue in background
+    // Return success response immediately
     const response = createSuccessResponse({
       message: 'Image received and processing started',
       filename: fileName,
@@ -416,7 +416,7 @@ serve(async (req) => {
       user_id: user.id
     })
 
-    // Start background processing (don't await)
+    // Start background processing
     processImageInBackground(
       supabaseClient,
       user,
