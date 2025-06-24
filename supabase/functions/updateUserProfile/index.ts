@@ -34,34 +34,12 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-// Standardized error response
-function createErrorResponse(message: string, status: number = 500) {
-  return new Response(
-    JSON.stringify({ error: message }),
-    { 
-      status, 
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-    }
-  )
-}
-
-// Standardized success response
-function createSuccessResponse(data: any) {
-  return new Response(
-    JSON.stringify(data),
-    { 
-      status: 200, 
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-    }
-  )
-}
-
-// Validates if the uploaded file type is allowed
+// Validates the uploaded file type
 function validateFileType(file: File): boolean {
   return IMAGE_CONFIG.allowedTypes.includes(file.type)
 }
 
-// Generates a unique filename for the profile image
+// Generates a filename
 function generateFileName(userId: string, originalName: string): string {
   const extension = originalName.split('.').pop()?.toLowerCase() || 'jpg'
 
@@ -132,7 +110,7 @@ function createOptimizedTransformationUrl(originalUrl: string, urlEndpoint: stri
   )
 }
 
-// Uploads image to ImageKit temporarily for processing
+// Uploads image to ImageKit temporarily
 async function uploadToImageKit(fileBuffer: ArrayBuffer, fileName: string, imageKitConfig: any) {
   const auth = btoa(`${imageKitConfig.privateKey}:`)
   
@@ -322,27 +300,29 @@ async function processImageInBackground(
     
     const processedImageUrl = urlData.publicUrl
 
-    // Prepare database update
-    const updateData: any = { [DATABASE_CONFIG.profileImageColumn]: processedImageUrl }
-    
-    if (fullName !== null && fullName !== undefined && fullName.trim() !== '') {
-      updateData.full_name = fullName.trim()
-    }
-    
-    if (birthDate !== null && birthDate !== undefined && birthDate.trim() !== '') {
-      updateData.birth_date = birthDate.trim()
-    }
-
-    // Update user details in database
-    const { error: updateError } = await supabaseClient
+    // Update profile image URL
+    const { error: imageUpdateError } = await supabaseClient
       .from(DATABASE_CONFIG.tableName)
       .upsert({
         user_id: user.id,
-        ...updateData
+        [DATABASE_CONFIG.profileImageColumn]: processedImageUrl
       })
 
-    if (updateError) {
-      console.error('[Background] Database update error:', updateError)
+    if (imageUpdateError) {
+      console.error('[Background] Profile image URL update error:', imageUpdateError)
+      return
+    }
+
+    // Update user details using database function
+    const { data: functionResult, error: functionError } = await supabaseClient
+      .rpc('edit_user_details', {
+        p_user_id: user.id,
+        p_full_name: fullName && fullName.trim() !== '' ? fullName.trim() : null,
+        p_birth_date: birthDate && birthDate.trim() !== '' ? birthDate.trim() : null
+      })
+
+    if (functionError) {
+      console.error('[Background] Database function error:', functionError)
       return
     }
 
@@ -377,7 +357,13 @@ serve(async (req) => {
     const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
     
     if (userError || !user) {
-      return createErrorResponse('Unauthorized', 401)
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { 
+          status: 401, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      )
     }
 
     // Parse form data
@@ -388,18 +374,36 @@ serve(async (req) => {
 
     // Validate image file exists
     if (!imageFile || imageFile.size === 0) {
-      return createErrorResponse('Image file is required', 400)
+      return new Response(
+        JSON.stringify({ error: 'Image file is required' }),
+        { 
+          status: 400, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      )
     }
 
     // Validate file type
     if (!validateFileType(imageFile)) {
-      return createErrorResponse(`Invalid file type. Only ${IMAGE_CONFIG.allowedTypes.join(', ')} are allowed.`, 400)
+      return new Response(
+        JSON.stringify({ error: `Invalid file type. Only ${IMAGE_CONFIG.allowedTypes.join(', ')} are allowed.` }),
+        { 
+          status: 400, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      )
     }
 
     // Get ImageKit configuration
     const imageKitConfig = getImageKitConfig()
     if (!imageKitConfig) {
-      return createErrorResponse('ImageKit configuration missing', 500)
+      return new Response(
+        JSON.stringify({ error: 'ImageKit configuration missing' }),
+        { 
+          status: 500, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      )
     }
 
     // Fetch existing user details for processing
@@ -409,12 +413,18 @@ serve(async (req) => {
     const fileName = generateFileName(user.id, imageFile.name)
 
     // Return success response immediately
-    const response = createSuccessResponse({
-      message: 'Image received and processing started',
-      filename: fileName,
-      processing: true,
-      user_id: user.id
-    })
+    const response = new Response(
+      JSON.stringify({
+        message: 'Image received and processing started',
+        filename: fileName,
+        processing: true,
+        user_id: user.id
+      }),
+      { 
+        status: 200, 
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      }
+    )
 
     // Start background processing
     processImageInBackground(
@@ -433,6 +443,12 @@ serve(async (req) => {
 
   } catch (error) {
     console.error('Function error:', error)
-    return createErrorResponse('Internal server error', 500)
+    return new Response(
+      JSON.stringify({ error: 'Internal server error' }),
+      { 
+        status: 500, 
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      }
+    )
   }
 })
