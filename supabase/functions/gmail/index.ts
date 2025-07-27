@@ -72,7 +72,7 @@ serve(async (req: Request): Promise<Response> => {
       )
     }
 
-    const response = await sendWithGmail({ to, subject, html, text, from, cc, bcc })
+    const response = await sendWithGmailServiceAccount({ to, subject, html, text, from, cc, bcc })
 
     return new Response(
       JSON.stringify(response),
@@ -97,40 +97,107 @@ serve(async (req: Request): Promise<Response> => {
   }
 })
 
-async function getGoogleAccessToken(): Promise<string> {
-  const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
-  const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
-  const refreshToken = Deno.env.get('GOOGLE_REFRESH_TOKEN')
-
-  if (!clientId || !clientSecret || !refreshToken) {
-    throw new Error('Missing Google OAuth credentials. Please set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN')
+async function getServiceAccountAccessToken(): Promise<string> {
+  const serviceAccountKey = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_KEY')
+  
+  if (!serviceAccountKey) {
+    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_KEY environment variable')
   }
 
+  let serviceAccount
+  try {
+    serviceAccount = JSON.parse(serviceAccountKey)
+  } catch (error) {
+    throw new Error('Invalid GOOGLE_SERVICE_ACCOUNT_KEY format. Must be valid JSON.')
+  }
+
+  const now = Math.floor(Date.now() / 1000)
+  const expiry = now + 3600 // 1 hour from now
+
+  // Create JWT header
+  const header = {
+    alg: 'RS256',
+    typ: 'JWT'
+  }
+
+  // Create JWT payload
+  const payload = {
+    iss: serviceAccount.client_email,
+    sub: Deno.env.get('GMAIL_USER_EMAIL'), // The Gmail user to impersonate
+    scope: 'https://www.googleapis.com/auth/gmail.send',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: expiry
+  }
+
+  // Create JWT
+  const jwt = await createJWT(header, payload, serviceAccount.private_key)
+
+  // Exchange JWT for access token
   const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token',
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: jwt,
     }),
   })
 
   const tokenData = await tokenResponse.json()
 
   if (!tokenResponse.ok) {
-    throw new Error(`Failed to refresh Google token: ${tokenData.error_description || tokenData.error}`)
+    throw new Error(`Failed to get service account token: ${tokenData.error_description || tokenData.error}`)
   }
 
   return tokenData.access_token
 }
 
+async function createJWT(header: any, payload: any, privateKey: string): Promise<string> {
+  const encoder = new TextEncoder()
+  
+  // Encode header and payload
+  const encodedHeader = base64UrlEncode(JSON.stringify(header))
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload))
+  
+  const message = `${encodedHeader}.${encodedPayload}`
+  const messageBytes = encoder.encode(message)
+  
+  // Import the private key
+  const keyData = privateKey
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s/g, '')
+  
+  const keyBytes = Uint8Array.from(atob(keyData), c => c.charCodeAt(0))
+  
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8',
+    keyBytes,
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      hash: 'SHA-256',
+    },
+    false,
+    ['sign']
+  )
+  
+  // Sign the message
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    cryptoKey,
+    messageBytes
+  )
+  
+  const encodedSignature = base64UrlEncode(new Uint8Array(signature))
+  
+  return `${message}.${encodedSignature}`
+}
+
 function createMimeMessage(emailData: EmailRequest): string {
   const boundary = `boundary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || Deno.env.get('GMAIL_FROM_EMAIL') || 'noreply@yourdomain.com'
+  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || Deno.env.get('GMAIL_USER_EMAIL') || 'noreply@yourdomain.com'
   
   let mimeMessage = ''
   
@@ -181,18 +248,24 @@ function createMimeMessage(emailData: EmailRequest): string {
   return mimeMessage
 }
 
-function base64UrlEncode(str: string): string {
-  const encoder = new TextEncoder()
-  const data = encoder.encode(str)
-  return btoa(String.fromCharCode(...data))
+function base64UrlEncode(input: string | Uint8Array): string {
+  let str: string
+  
+  if (typeof input === 'string') {
+    str = btoa(input)
+  } else {
+    str = btoa(String.fromCharCode(...input))
+  }
+  
+  return str
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=/g, '')
 }
 
-async function sendWithGmail(emailData: EmailRequest): Promise<EmailResponse> {
+async function sendWithGmailServiceAccount(emailData: EmailRequest): Promise<EmailResponse> {
   try {
-    const accessToken = await getGoogleAccessToken()
+    const accessToken = await getServiceAccountAccessToken()
     const mimeMessage = createMimeMessage(emailData)
     const encodedMessage = base64UrlEncode(mimeMessage)
     
@@ -219,15 +292,15 @@ async function sendWithGmail(emailData: EmailRequest): Promise<EmailResponse> {
 
     return {
       success: true,
-      message: 'Email sent successfully via Gmail',
+      message: 'Email sent successfully via Gmail Service Account',
       messageId: result.id
     }
 
   } catch (error) {
-    console.error('Gmail sending error:', error)
+    console.error('Gmail Service Account sending error:', error)
     return {
       success: false,
-      message: error instanceof Error ? error.message : 'Failed to send email via Gmail'
+      message: error instanceof Error ? error.message : 'Failed to send email via Gmail Service Account'
     }
   }
 }
