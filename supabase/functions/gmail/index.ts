@@ -24,7 +24,7 @@ serve(async (req) => {
       });
     }
 
-    const { to, subject, html, text, from, cc, bcc } = await req.json();
+    const { to, subject, html, cc, bcc } = await req.json();
 
     // Validate required fields
     if (!to || !subject) {
@@ -37,10 +37,10 @@ serve(async (req) => {
       });
     }
 
-    if (!html && !text) {
+    if (!html) {
       return new Response(JSON.stringify({
         success: false,
-        message: 'Either html or text content is required'
+        message: 'HTML content is required'
       }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -49,7 +49,7 @@ serve(async (req) => {
 
     // Send email using Gmail API
     const response = await sendWithGmailAPI({
-      to, subject, html, text, from, cc, bcc
+      to, subject, html, cc, bcc
     });
 
     return new Response(JSON.stringify(response), {
@@ -162,14 +162,15 @@ async function getAccessToken() {
 }
 
 function createEmailMessage(emailData) {
-  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || 'haivy.health@gmail.com';
+  const fromEmail = 'haivy.health@gmail.com';
   
   // Create email headers
   const headers = [
-    `From: ${emailData.from || defaultFrom}`,
+    `From: ${fromEmail}`,
     `To: ${Array.isArray(emailData.to) ? emailData.to.join(', ') : emailData.to}`,
     `Subject: ${emailData.subject}`,
-    'MIME-Version: 1.0'
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8'
   ];
 
   if (emailData.cc) {
@@ -180,33 +181,9 @@ function createEmailMessage(emailData) {
     headers.push(`Bcc: ${Array.isArray(emailData.bcc) ? emailData.bcc.join(', ') : emailData.bcc}`);
   }
 
-  let body = '';
+  // Use HTML content only
+  const body = emailData.html;
   
-  // Handle content
-  if (emailData.html && emailData.text) {
-    const boundary = `boundary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-    
-    body = `
---${boundary}
-Content-Type: text/plain; charset=UTF-8
-
-${emailData.text}
-
---${boundary}
-Content-Type: text/html; charset=UTF-8
-
-${emailData.html}
-
---${boundary}--`;
-  } else if (emailData.html) {
-    headers.push('Content-Type: text/html; charset=UTF-8');
-    body = emailData.html;
-  } else {
-    headers.push('Content-Type: text/plain; charset=UTF-8');
-    body = emailData.text;
-  }
-
   // Combine headers and body
   const email = headers.join('\r\n') + '\r\n\r\n' + body;
   
