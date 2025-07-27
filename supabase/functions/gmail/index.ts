@@ -72,7 +72,36 @@ serve(async (req: Request): Promise<Response> => {
       )
     }
 
-    const response = await sendWithGmailServiceAccount({ to, subject, html, text, from, cc, bcc })
+    // Get email provider from environment
+    const emailProvider = Deno.env.get('EMAIL_PROVIDER') || 'resend'
+    
+    let response: EmailResponse
+
+    switch (emailProvider) {
+      case 'resend':
+        response = await sendWithResend({ to, subject, html, text, from, cc, bcc })
+        break
+      case 'brevo':
+        response = await sendWithBrevo({ to, subject, html, text, from, cc, bcc })
+        break
+      case 'gmail-smtp':
+        response = await sendWithGmailSMTP({ to, subject, html, text, from, cc, bcc })
+        break
+      case 'outlook-smtp':
+        response = await sendWithOutlookSMTP({ to, subject, html, text, from, cc, bcc })
+        break
+      default:
+        return new Response(
+          JSON.stringify({ 
+            success: false, 
+            message: 'Unsupported email provider' 
+          }),
+          { 
+            status: 500, 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        )
+    }
 
     return new Response(
       JSON.stringify(response),
@@ -97,107 +126,176 @@ serve(async (req: Request): Promise<Response> => {
   }
 })
 
-async function getServiceAccountAccessToken(): Promise<string> {
-  const serviceAccountKey = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_KEY')
+// FREE OPTION 1: Resend (100 emails/month free)
+async function sendWithResend(emailData: EmailRequest): Promise<EmailResponse> {
+  const resendApiKey = Deno.env.get('RESEND_API_KEY')
+  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || 'noreply@yourdomain.com'
   
-  if (!serviceAccountKey) {
-    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_KEY environment variable')
+  if (!resendApiKey) {
+    throw new Error('RESEND_API_KEY environment variable is required')
   }
 
-  let serviceAccount
-  try {
-    serviceAccount = JSON.parse(serviceAccountKey)
-  } catch (error) {
-    throw new Error('Invalid GOOGLE_SERVICE_ACCOUNT_KEY format. Must be valid JSON.')
-  }
-
-  const now = Math.floor(Date.now() / 1000)
-  const expiry = now + 3600 // 1 hour from now
-
-  // Create JWT header
-  const header = {
-    alg: 'RS256',
-    typ: 'JWT'
-  }
-
-  // Create JWT payload
   const payload = {
-    iss: serviceAccount.client_email,
-    sub: Deno.env.get('GMAIL_USER_EMAIL'), // The Gmail user to impersonate
-    scope: 'https://www.googleapis.com/auth/gmail.send',
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: expiry
+    from: emailData.from || defaultFrom,
+    to: Array.isArray(emailData.to) ? emailData.to : [emailData.to],
+    subject: emailData.subject,
+    html: emailData.html,
+    text: emailData.text,
+    cc: emailData.cc ? (Array.isArray(emailData.cc) ? emailData.cc : [emailData.cc]) : undefined,
+    bcc: emailData.bcc ? (Array.isArray(emailData.bcc) ? emailData.bcc : [emailData.bcc]) : undefined,
   }
 
-  // Create JWT
-  const jwt = await createJWT(header, payload, serviceAccount.private_key)
-
-  // Exchange JWT for access token
-  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+  const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': `Bearer ${resendApiKey}`,
+      'Content-Type': 'application/json',
     },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion: jwt,
-    }),
+    body: JSON.stringify(payload),
   })
 
-  const tokenData = await tokenResponse.json()
+  const result = await response.json()
 
-  if (!tokenResponse.ok) {
-    throw new Error(`Failed to get service account token: ${tokenData.error_description || tokenData.error}`)
+  if (!response.ok) {
+    return {
+      success: false,
+      message: result.message || 'Failed to send email with Resend'
+    }
   }
 
-  return tokenData.access_token
+  return {
+    success: true,
+    message: 'Email sent successfully with Resend',
+    messageId: result.id
+  }
 }
 
-async function createJWT(header: any, payload: any, privateKey: string): Promise<string> {
-  const encoder = new TextEncoder()
+// FREE OPTION 2: Brevo (300 emails/day free)
+async function sendWithBrevo(emailData: EmailRequest): Promise<EmailResponse> {
+  const brevoApiKey = Deno.env.get('BREVO_API_KEY')
+  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || 'noreply@yourdomain.com'
   
-  // Encode header and payload
-  const encodedHeader = base64UrlEncode(JSON.stringify(header))
-  const encodedPayload = base64UrlEncode(JSON.stringify(payload))
-  
-  const message = `${encodedHeader}.${encodedPayload}`
-  const messageBytes = encoder.encode(message)
-  
-  // Import the private key
-  const keyData = privateKey
-    .replace(/-----BEGIN PRIVATE KEY-----/, '')
-    .replace(/-----END PRIVATE KEY-----/, '')
-    .replace(/\s/g, '')
-  
-  const keyBytes = Uint8Array.from(atob(keyData), c => c.charCodeAt(0))
-  
-  const cryptoKey = await crypto.subtle.importKey(
-    'pkcs8',
-    keyBytes,
-    {
-      name: 'RSASSA-PKCS1-v1_5',
-      hash: 'SHA-256',
+  if (!brevoApiKey) {
+    throw new Error('BREVO_API_KEY environment variable is required')
+  }
+
+  const payload = {
+    sender: { email: emailData.from || defaultFrom },
+    to: Array.isArray(emailData.to) 
+      ? emailData.to.map(email => ({ email }))
+      : [{ email: emailData.to }],
+    subject: emailData.subject,
+    htmlContent: emailData.html,
+    textContent: emailData.text,
+    cc: emailData.cc ? (Array.isArray(emailData.cc) 
+      ? emailData.cc.map(email => ({ email }))
+      : [{ email: emailData.cc }]) : undefined,
+    bcc: emailData.bcc ? (Array.isArray(emailData.bcc) 
+      ? emailData.bcc.map(email => ({ email }))
+      : [{ email: emailData.bcc }]) : undefined,
+  }
+
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': brevoApiKey,
+      'Content-Type': 'application/json',
     },
-    false,
-    ['sign']
-  )
+    body: JSON.stringify(payload),
+  })
+
+  const result = await response.json()
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: result.message || 'Failed to send email with Brevo'
+    }
+  }
+
+  return {
+    success: true,
+    message: 'Email sent successfully with Brevo',
+    messageId: result.messageId
+  }
+}
+
+// FREE OPTION 3: Gmail SMTP (with App Password)
+async function sendWithGmailSMTP(emailData: EmailRequest): Promise<EmailResponse> {
+  const gmailUser = Deno.env.get('GMAIL_USER')
+  const gmailAppPassword = Deno.env.get('GMAIL_APP_PASSWORD')
   
-  // Sign the message
-  const signature = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
-    cryptoKey,
-    messageBytes
-  )
+  if (!gmailUser || !gmailAppPassword) {
+    throw new Error('GMAIL_USER and GMAIL_APP_PASSWORD environment variables are required')
+  }
+
+  try {
+    const mimeMessage = createMimeMessage(emailData)
+    const encodedMessage = btoa(mimeMessage).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+    
+    // Use Gmail's REST API with Basic Auth (App Password)
+    const response = await fetch('https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${btoa(`${gmailUser}:${gmailAppPassword}`)}`,
+        'Content-Type': 'message/rfc822',
+      },
+      body: mimeMessage,
+    })
+
+    if (!response.ok) {
+      // Fallback to SMTP-like approach using fetch
+      return await sendViaSMTPRelay(emailData)
+    }
+
+    const result = await response.json()
+    
+    return {
+      success: true,
+      message: 'Email sent successfully with Gmail SMTP',
+      messageId: result.id
+    }
+
+  } catch (error) {
+    return {
+      success: false,
+      message: `Gmail SMTP error: ${error instanceof Error ? error.message : 'Unknown error'}`
+    }
+  }
+}
+
+// FREE OPTION 4: Outlook SMTP (with App Password)
+async function sendWithOutlookSMTP(emailData: EmailRequest): Promise<EmailResponse> {
+  const outlookUser = Deno.env.get('OUTLOOK_USER')
+  const outlookPassword = Deno.env.get('OUTLOOK_PASSWORD')
   
-  const encodedSignature = base64UrlEncode(new Uint8Array(signature))
-  
-  return `${message}.${encodedSignature}`
+  if (!outlookUser || !outlookPassword) {
+    throw new Error('OUTLOOK_USER and OUTLOOK_PASSWORD environment variables are required')
+  }
+
+  try {
+    return await sendViaSMTPRelay(emailData, 'outlook')
+  } catch (error) {
+    return {
+      success: false,
+      message: `Outlook SMTP error: ${error instanceof Error ? error.message : 'Unknown error'}`
+    }
+  }
+}
+
+// Helper function for SMTP-like sending
+async function sendViaSMTPRelay(emailData: EmailRequest, provider: string = 'gmail'): Promise<EmailResponse> {
+  // This is a simplified approach - in production, you'd use a proper SMTP library
+  // For now, we'll return an error suggesting to use API-based providers
+  return {
+    success: false,
+    message: 'SMTP functionality requires additional setup. Please use Resend or Brevo for easier integration.'
+  }
 }
 
 function createMimeMessage(emailData: EmailRequest): string {
   const boundary = `boundary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || Deno.env.get('GMAIL_USER_EMAIL') || 'noreply@yourdomain.com'
+  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || 'noreply@yourdomain.com'
   
   let mimeMessage = ''
   
@@ -216,91 +314,28 @@ function createMimeMessage(emailData: EmailRequest): string {
   mimeMessage += `Subject: ${emailData.subject}\r\n`
   mimeMessage += `MIME-Version: 1.0\r\n`
   
-  // If we have both HTML and text, use multipart
+  // Content
   if (emailData.html && emailData.text) {
     mimeMessage += `Content-Type: multipart/alternative; boundary="${boundary}"\r\n\r\n`
     
     // Text part
     mimeMessage += `--${boundary}\r\n`
-    mimeMessage += `Content-Type: text/plain; charset=UTF-8\r\n`
-    mimeMessage += `Content-Transfer-Encoding: quoted-printable\r\n\r\n`
+    mimeMessage += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`
     mimeMessage += `${emailData.text}\r\n\r\n`
     
     // HTML part
     mimeMessage += `--${boundary}\r\n`
-    mimeMessage += `Content-Type: text/html; charset=UTF-8\r\n`
-    mimeMessage += `Content-Transfer-Encoding: quoted-printable\r\n\r\n`
+    mimeMessage += `Content-Type: text/html; charset=UTF-8\r\n\r\n`
     mimeMessage += `${emailData.html}\r\n\r\n`
     
     mimeMessage += `--${boundary}--\r\n`
   } else if (emailData.html) {
-    // HTML only
-    mimeMessage += `Content-Type: text/html; charset=UTF-8\r\n`
-    mimeMessage += `Content-Transfer-Encoding: quoted-printable\r\n\r\n`
+    mimeMessage += `Content-Type: text/html; charset=UTF-8\r\n\r\n`
     mimeMessage += `${emailData.html}\r\n`
   } else {
-    // Text only
-    mimeMessage += `Content-Type: text/plain; charset=UTF-8\r\n`
-    mimeMessage += `Content-Transfer-Encoding: quoted-printable\r\n\r\n`
+    mimeMessage += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`
     mimeMessage += `${emailData.text}\r\n`
   }
   
   return mimeMessage
-}
-
-function base64UrlEncode(input: string | Uint8Array): string {
-  let str: string
-  
-  if (typeof input === 'string') {
-    str = btoa(input)
-  } else {
-    str = btoa(String.fromCharCode(...input))
-  }
-  
-  return str
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '')
-}
-
-async function sendWithGmailServiceAccount(emailData: EmailRequest): Promise<EmailResponse> {
-  try {
-    const accessToken = await getServiceAccountAccessToken()
-    const mimeMessage = createMimeMessage(emailData)
-    const encodedMessage = base64UrlEncode(mimeMessage)
-    
-    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        raw: encodedMessage,
-      }),
-    })
-
-    const result = await response.json()
-
-    if (!response.ok) {
-      console.error('Gmail API error:', result)
-      return {
-        success: false,
-        message: result.error?.message || 'Failed to send email via Gmail'
-      }
-    }
-
-    return {
-      success: true,
-      message: 'Email sent successfully via Gmail Service Account',
-      messageId: result.id
-    }
-
-  } catch (error) {
-    console.error('Gmail Service Account sending error:', error)
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : 'Failed to send email via Gmail Service Account'
-    }
-  }
 }
