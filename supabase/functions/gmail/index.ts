@@ -9,9 +9,7 @@ const corsHeaders = {
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
-    return new Response('ok', {
-      headers: corsHeaders
-    });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   try {
@@ -22,10 +20,7 @@ serve(async (req) => {
         message: 'Method not allowed'
       }), {
         status: 405,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json'
-        }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
@@ -38,10 +33,7 @@ serve(async (req) => {
         message: 'Missing required fields: to, subject'
       }), {
         status: 400,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json'
-        }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
@@ -51,156 +43,176 @@ serve(async (req) => {
         message: 'Either html or text content is required'
       }), {
         status: 400,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json'
-        }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
-    // Send email using Gmail SMTP
-    const response = await sendWithGmailSMTP({
-      to,
-      subject,
-      html,
-      text,
-      from,
-      cc,
-      bcc
+    // Send email using Gmail API
+    const response = await sendWithGmailAPI({
+      to, subject, html, text, from, cc, bcc
     });
 
     return new Response(JSON.stringify(response), {
       status: response.success ? 200 : 500,
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'application/json'
-      }
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
 
   } catch (error) {
     console.error('Email function error:', error);
     return new Response(JSON.stringify({
       success: false,
-      message: 'Internal server error'
+      message: 'Internal server error',
+      error: error.message
     }), {
       status: 500,
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'application/json'
-      }
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
 });
 
-// Gmail SMTP using external SMTP service
-async function sendWithGmailSMTP(emailData) {
-  const gmailUser = Deno.env.get('GMAIL_USER') || 'haivy.health@gmail.com';
-  const gmailAppPassword = Deno.env.get('GMAIL_APP_PASSWORD') || 'yzst srqs mbml dmzj';
-
-  if (!gmailUser || !gmailAppPassword) {
-    throw new Error('GMAIL_USER and GMAIL_APP_PASSWORD environment variables are required');
-  }
-
+async function sendWithGmailAPI(emailData) {
   try {
-    // Use a third-party SMTP service API that supports Gmail credentials
-    // We'll use SMTPjs or similar service for actual SMTP sending
-    const emailPayload = {
-      Host: "smtp.gmail.com",
-      Username: gmailUser,
-      Password: gmailAppPassword,
-      To: Array.isArray(emailData.to) ? emailData.to.join(',') : emailData.to,
-      From: emailData.from || gmailUser,
-      Subject: emailData.subject,
-      Body: emailData.html || emailData.text,
-      Cc: emailData.cc ? (Array.isArray(emailData.cc) ? emailData.cc.join(',') : emailData.cc) : undefined,
-      Bcc: emailData.bcc ? (Array.isArray(emailData.bcc) ? emailData.bcc.join(',') : emailData.bcc) : undefined
-    };
+    // Get fresh access token
+    const accessToken = await getAccessToken();
+    
+    if (!accessToken) {
+      return {
+        success: false,
+        message: 'Failed to get access token'
+      };
+    }
 
-    // Use ElasticEmail's SMTP API as a proxy (free tier available)
-    // This is a workaround since direct SMTP isn't available in Edge Functions
-    const response = await fetch('https://api.elasticemail.com/v2/email/send', {
+    // Create the email message
+    const rawMessage = createEmailMessage(emailData);
+    
+    // Send via Gmail API
+    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
       },
-      body: new URLSearchParams({
-        apikey: Deno.env.get('ELASTIC_EMAIL_API_KEY') || 'your-elastic-email-api-key',
-        from: emailData.from || gmailUser,
-        to: Array.isArray(emailData.to) ? emailData.to.join(',') : emailData.to,
-        subject: emailData.subject,
-        bodyHtml: emailData.html || '',
-        bodyText: emailData.text || '',
-        cc: emailData.cc ? (Array.isArray(emailData.cc) ? emailData.cc.join(',') : emailData.cc) : '',
-        bcc: emailData.bcc ? (Array.isArray(emailData.bcc) ? emailData.bcc.join(',') : emailData.bcc) : ''
-      }).toString()
+      body: JSON.stringify({
+        raw: rawMessage
+      })
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorData = await response.json();
+      console.error('Gmail API error:', errorData);
       return {
         success: false,
-        message: `Email sending failed: ${errorText}`
+        message: `Gmail API error: ${errorData.error?.message || 'Unknown error'}`,
+        details: errorData
       };
     }
 
     const result = await response.json();
     return {
       success: true,
-      message: 'Email sent successfully',
-      messageId: result.data?.messageid || 'sent'
+      message: 'Email sent successfully via Gmail API',
+      messageId: result.id
     };
 
   } catch (error) {
+    console.error('Gmail API function error:', error);
     return {
       success: false,
-      message: `Email sending error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      message: `Gmail API error: ${error.message}`
     };
   }
 }
 
-function createMimeMessage(emailData) {
-  const boundary = `boundary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || 'noreply@yourdomain.com';
+async function getAccessToken() {
+  const refreshToken = Deno.env.get('GMAIL_REFRESH_TOKEN');
+  const clientId = Deno.env.get('GMAIL_CLIENT_ID');
+  const clientSecret = Deno.env.get('GMAIL_CLIENT_SECRET');
+
+  if (!refreshToken || !clientId || !clientSecret) {
+    console.error('Missing OAuth2 credentials');
+    throw new Error('Missing OAuth2 credentials: GMAIL_REFRESH_TOKEN, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET');
+  }
+
+  try {
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: clientId,
+        client_secret: clientSecret
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error('OAuth2 refresh error:', errorData);
+      throw new Error(`OAuth2 error: ${errorData.error_description || errorData.error}`);
+    }
+
+    const data = await response.json();
+    return data.access_token;
+  } catch (error) {
+    console.error('Failed to refresh access token:', error);
+    return null;
+  }
+}
+
+function createEmailMessage(emailData) {
+  const defaultFrom = Deno.env.get('DEFAULT_FROM_EMAIL') || 'haivy.health@gmail.com';
   
-  let mimeMessage = '';
-  
-  // Headers
-  mimeMessage += `From: ${emailData.from || defaultFrom}\r\n`;
-  mimeMessage += `To: ${Array.isArray(emailData.to) ? emailData.to.join(', ') : emailData.to}\r\n`;
-  
+  // Create email headers
+  const headers = [
+    `From: ${emailData.from || defaultFrom}`,
+    `To: ${Array.isArray(emailData.to) ? emailData.to.join(', ') : emailData.to}`,
+    `Subject: ${emailData.subject}`,
+    'MIME-Version: 1.0'
+  ];
+
   if (emailData.cc) {
-    mimeMessage += `Cc: ${Array.isArray(emailData.cc) ? emailData.cc.join(', ') : emailData.cc}\r\n`;
+    headers.push(`Cc: ${Array.isArray(emailData.cc) ? emailData.cc.join(', ') : emailData.cc}`);
   }
-  
+
   if (emailData.bcc) {
-    mimeMessage += `Bcc: ${Array.isArray(emailData.bcc) ? emailData.bcc.join(', ') : emailData.bcc}\r\n`;
+    headers.push(`Bcc: ${Array.isArray(emailData.bcc) ? emailData.bcc.join(', ') : emailData.bcc}`);
   }
+
+  let body = '';
   
-  mimeMessage += `Subject: ${emailData.subject}\r\n`;
-  mimeMessage += `MIME-Version: 1.0\r\n`;
-  
-  // Content
+  // Handle content
   if (emailData.html && emailData.text) {
-    mimeMessage += `Content-Type: multipart/alternative; boundary="${boundary}"\r\n\r\n`;
+    const boundary = `boundary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
     
-    // Text part
-    mimeMessage += `--${boundary}\r\n`;
-    mimeMessage += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`;
-    mimeMessage += `${emailData.text}\r\n\r\n`;
-    
-    // HTML part
-    mimeMessage += `--${boundary}\r\n`;
-    mimeMessage += `Content-Type: text/html; charset=UTF-8\r\n\r\n`;
-    mimeMessage += `${emailData.html}\r\n\r\n`;
-    
-    mimeMessage += `--${boundary}--\r\n`;
+    body = `
+--${boundary}
+Content-Type: text/plain; charset=UTF-8
+
+${emailData.text}
+
+--${boundary}
+Content-Type: text/html; charset=UTF-8
+
+${emailData.html}
+
+--${boundary}--`;
   } else if (emailData.html) {
-    mimeMessage += `Content-Type: text/html; charset=UTF-8\r\n\r\n`;
-    mimeMessage += `${emailData.html}\r\n`;
+    headers.push('Content-Type: text/html; charset=UTF-8');
+    body = emailData.html;
   } else {
-    mimeMessage += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`;
-    mimeMessage += `${emailData.text}\r\n`;
+    headers.push('Content-Type: text/plain; charset=UTF-8');
+    body = emailData.text;
   }
+
+  // Combine headers and body
+  const email = headers.join('\r\n') + '\r\n\r\n' + body;
   
-  return mimeMessage;
+  // Base64 encode (URL-safe)
+  return btoa(email)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
 }
