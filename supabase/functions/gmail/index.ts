@@ -92,7 +92,7 @@ serve(async (req) => {
   }
 });
 
-// Gmail SMTP (with App Password)
+// Gmail SMTP using external SMTP service
 async function sendWithGmailSMTP(emailData) {
   const gmailUser = Deno.env.get('GMAIL_USER') || 'haivy.health@gmail.com';
   const gmailAppPassword = Deno.env.get('GMAIL_APP_PASSWORD') || 'yzst srqs mbml dmzj';
@@ -102,37 +102,58 @@ async function sendWithGmailSMTP(emailData) {
   }
 
   try {
-    const mimeMessage = createMimeMessage(emailData);
-    
-    // Use Gmail's REST API with Basic Auth (App Password)
-    const response = await fetch('https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send', {
+    // Use a third-party SMTP service API that supports Gmail credentials
+    // We'll use SMTPjs or similar service for actual SMTP sending
+    const emailPayload = {
+      Host: "smtp.gmail.com",
+      Username: gmailUser,
+      Password: gmailAppPassword,
+      To: Array.isArray(emailData.to) ? emailData.to.join(',') : emailData.to,
+      From: emailData.from || gmailUser,
+      Subject: emailData.subject,
+      Body: emailData.html || emailData.text,
+      Cc: emailData.cc ? (Array.isArray(emailData.cc) ? emailData.cc.join(',') : emailData.cc) : undefined,
+      Bcc: emailData.bcc ? (Array.isArray(emailData.bcc) ? emailData.bcc.join(',') : emailData.bcc) : undefined
+    };
+
+    // Use ElasticEmail's SMTP API as a proxy (free tier available)
+    // This is a workaround since direct SMTP isn't available in Edge Functions
+    const response = await fetch('https://api.elasticemail.com/v2/email/send', {
       method: 'POST',
       headers: {
-        'Authorization': `Basic ${btoa(`${gmailUser}:${gmailAppPassword}`)}`,
-        'Content-Type': 'message/rfc822'
+        'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: mimeMessage
+      body: new URLSearchParams({
+        apikey: Deno.env.get('ELASTIC_EMAIL_API_KEY') || 'your-elastic-email-api-key',
+        from: emailData.from || gmailUser,
+        to: Array.isArray(emailData.to) ? emailData.to.join(',') : emailData.to,
+        subject: emailData.subject,
+        bodyHtml: emailData.html || '',
+        bodyText: emailData.text || '',
+        cc: emailData.cc ? (Array.isArray(emailData.cc) ? emailData.cc.join(',') : emailData.cc) : '',
+        bcc: emailData.bcc ? (Array.isArray(emailData.bcc) ? emailData.bcc.join(',') : emailData.bcc) : ''
+      }).toString()
     });
 
     if (!response.ok) {
       const errorText = await response.text();
       return {
         success: false,
-        message: `Gmail API error: ${errorText}`
+        message: `Email sending failed: ${errorText}`
       };
     }
 
     const result = await response.json();
     return {
       success: true,
-      message: 'Email sent successfully with Gmail',
-      messageId: result.id
+      message: 'Email sent successfully',
+      messageId: result.data?.messageid || 'sent'
     };
 
   } catch (error) {
     return {
       success: false,
-      message: `Gmail SMTP error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      message: `Email sending error: ${error instanceof Error ? error.message : 'Unknown error'}`
     };
   }
 }
