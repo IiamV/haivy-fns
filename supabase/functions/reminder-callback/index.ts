@@ -1,65 +1,92 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
 };
+
 // Simple encryption/decryption functions
-const ENCRYPTION_KEY = Deno.env.get('ENCRYPTION_KEY'); // Should be stored as env variable
-async function encrypt(text) {
+const ENCRYPTION_KEY = Deno.env.get('ENCRYPTION_KEY');
+
+async function encrypt(text: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(text);
-  const key = await crypto.subtle.importKey("raw", encoder.encode(ENCRYPTION_KEY), {
-    name: "AES-GCM"
-  }, false, [
-    "encrypt"
-  ]);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(ENCRYPTION_KEY),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt"]
+  );
+  
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt({
-    name: "AES-GCM",
-    iv
-  }, key, data);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    data
+  );
+  
   // Combine IV and encrypted data
   const combined = new Uint8Array(iv.length + encrypted.byteLength);
   combined.set(iv);
   combined.set(new Uint8Array(encrypted), iv.length);
+  
   return btoa(String.fromCharCode(...combined));
 }
-async function decrypt(encryptedText) {
+
+async function decrypt(encryptedText: string): Promise<string> {
   try {
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
-    const combined = new Uint8Array(atob(encryptedText).split('').map((char)=>char.charCodeAt(0)));
+    
+    const combined = new Uint8Array(
+      atob(encryptedText).split('').map(char => char.charCodeAt(0))
+    );
+    
     const iv = combined.slice(0, 12);
     const encrypted = combined.slice(12);
-    const key = await crypto.subtle.importKey("raw", encoder.encode(ENCRYPTION_KEY), {
-      name: "AES-GCM"
-    }, false, [
-      "decrypt"
-    ]);
-    const decrypted = await crypto.subtle.decrypt({
-      name: "AES-GCM",
-      iv
-    }, key, encrypted);
+    
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(ENCRYPTION_KEY),
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"]
+    );
+    
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      encrypted
+    );
+    
     return decoder.decode(decrypted);
   } catch (error) {
     throw new Error('Decryption failed');
   }
 }
-serve(async (req)=>{
+
+serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response('ok', {
       headers: corsHeaders
     });
   }
+
   try {
     // Initialize Supabase client with service role key (no JWT verification)
-    const supabaseClient = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
+
     // Get URL parameters
     const url = new URL(req.url);
     const scheduleId = url.searchParams.get('schedule_id');
     const token = url.searchParams.get('token');
+
     if (!scheduleId || !token) {
       return new Response(`<!DOCTYPE html>
         <html>
@@ -76,8 +103,14 @@ serve(async (req)=>{
         }
       });
     }
+
     // Get the medicine schedule record
-    const { data: scheduleData, error: fetchError } = await supabaseClient.from('medicine_schedule').select('id, date, taken, prescription').eq('id', scheduleId).single();
+    const { data: scheduleData, error: fetchError } = await supabaseClient
+      .from('medicine_schedule')
+      .select('id, date, taken, prescription')
+      .eq('id', scheduleId)
+      .single();
+
     if (fetchError || !scheduleData) {
       console.error('Schedule fetch error:', fetchError);
       return new Response(`<!DOCTYPE html>
@@ -96,6 +129,7 @@ serve(async (req)=>{
         }
       });
     }
+
     // Get patient email using the exact query structure
     const { data: patientEmailData, error: emailError } = await supabaseClient.rpc('exec_sql', {
       sql: `
@@ -106,16 +140,21 @@ serve(async (req)=>{
         JOIN auth.users au ON ud.user_id = au.id
         WHERE pst.prescription_id = $1
       `,
-      params: [
-        scheduleData.prescription
-      ]
+      params: [scheduleData.prescription]
     });
+
     // Alternative approach using regular Supabase queries if RPC doesn't work
-    let patientEmail;
+    let patientEmail: string;
+    
     if (emailError) {
       console.log('RPC failed, trying alternative approach:', emailError);
       // Get prescription first
-      const { data: prescriptionData, error: prescError } = await supabaseClient.from('prescriptions').select('prescription_id, appointment_id').eq('prescription_id', scheduleData.prescription).single();
+      const { data: prescriptionData, error: prescError } = await supabaseClient
+        .from('prescriptions')
+        .select('prescription_id, appointment_id')
+        .eq('prescription_id', scheduleData.prescription)
+        .single();
+
       if (prescError || !prescriptionData) {
         console.error('Prescription error:', prescError);
         return new Response(`<!DOCTYPE html>
@@ -133,8 +172,14 @@ serve(async (req)=>{
           }
         });
       }
+
       // Get appointment
-      const { data: appointmentData, error: aptError } = await supabaseClient.from('appointment').select('appointment_id, patient_id').eq('appointment_id', prescriptionData.appointment_id).single();
+      const { data: appointmentData, error: aptError } = await supabaseClient
+        .from('appointment')
+        .select('appointment_id, patient_id')
+        .eq('appointment_id', prescriptionData.appointment_id)
+        .single();
+
       if (aptError || !appointmentData) {
         console.error('Appointment error:', aptError);
         return new Response(`<!DOCTYPE html>
@@ -152,8 +197,14 @@ serve(async (req)=>{
           }
         });
       }
+
       // Get user details
-      const { data: userDetailsData, error: udError } = await supabaseClient.from('user_details').select('user_id').eq('user_id', appointmentData.patient_id).single();
+      const { data: userDetailsData, error: udError } = await supabaseClient
+        .from('user_details')
+        .select('user_id')
+        .eq('user_id', appointmentData.patient_id)
+        .single();
+
       if (udError || !userDetailsData) {
         console.error('User details error:', udError);
         return new Response(`<!DOCTYPE html>
@@ -171,8 +222,10 @@ serve(async (req)=>{
           }
         });
       }
+
       // Get user email from auth.users
       const { data: authUserData, error: authError } = await supabaseClient.auth.admin.getUserById(userDetailsData.user_id);
+
       if (authError || !authUserData.user || !authUserData.user.email) {
         console.error('Auth user error:', authError);
         return new Response(`<!DOCTYPE html>
@@ -190,6 +243,7 @@ serve(async (req)=>{
           }
         });
       }
+
       patientEmail = authUserData.user.email;
     } else {
       // Use RPC result
@@ -211,10 +265,12 @@ serve(async (req)=>{
       }
       patientEmail = patientEmailData[0].email;
     }
+
     // Decrypt and verify the token
     try {
       const tokenData = await decrypt(token);
       const expectedData = `${scheduleId}|${patientEmail}|${scheduleData.date}`;
+      
       if (tokenData !== expectedData) {
         console.error('Token verification failed. Expected:', expectedData, 'Received:', tokenData);
         return new Response(`<!DOCTYPE html>
@@ -249,6 +305,7 @@ serve(async (req)=>{
         }
       });
     }
+
     // Check if already taken
     if (scheduleData.taken) {
       return new Response(`
@@ -298,10 +355,13 @@ serve(async (req)=>{
         }
       });
     }
+
     // Update the medicine schedule to mark as taken
-    const { error: updateError } = await supabaseClient.from('medicine_schedule').update({
-      taken: true
-    }).eq('id', scheduleId);
+    const { error: updateError } = await supabaseClient
+      .from('medicine_schedule')
+      .update({ taken: true })
+      .eq('id', scheduleId);
+
     if (updateError) {
       console.error('Update error:', updateError);
       return new Response(`<!DOCTYPE html>
@@ -319,6 +379,7 @@ serve(async (req)=>{
         }
       });
     }
+
     // Return success page
     return new Response(`
       <!DOCTYPE html>
@@ -374,6 +435,7 @@ serve(async (req)=>{
         'Content-Type': 'text/html'
       }
     });
+
   } catch (error) {
     console.error('Function error:', error);
     return new Response(`<!DOCTYPE html>
