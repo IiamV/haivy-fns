@@ -85,8 +85,8 @@ async function handleThreeDayReminders(supabase: any, now: Date, threeDaysFromNo
       is_online,
       patient_id,
       staff_id,
-      user_details!appointment_patient_id_fkey1(user_id, email, first_name, last_name),
-      staff:user_details!appointment_staff_id_fkey1(user_id, email, first_name, last_name)
+      patient:user_details!appointment_patient_id_fkey1(user_id, full_name),
+      staff:user_details!appointment_staff_id_fkey1(user_id, full_name)
     `)
     .gte('meeting_date', threeDaysAgo.toISOString())
     .lte('meeting_date', threeDaysFromNow.toISOString())
@@ -127,8 +127,8 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
       meeting_link,
       patient_id,
       staff_id,
-      user_details!appointment_patient_id_fkey1(user_id, email, first_name, last_name),
-      staff:user_details!appointment_staff_id_fkey1(user_id, email, first_name, last_name)
+      patient:user_details!appointment_patient_id_fkey1(user_id, full_name),
+      staff:user_details!appointment_staff_id_fkey1(user_id, full_name)
     `)
     .gte('meeting_date', thirtyMinutesAgo.toISOString())
     .lte('meeting_date', thirtyMinutesFromNow.toISOString())
@@ -146,7 +146,7 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
   // Create Google Meet links for each appointment
   for (const appointment of appointments || []) {
     try {
-      const meetLink = await createGoogleMeetLink(appointment, credentials)
+      const meetLink = await createGoogleMeetLink(appointment, credentials, supabase)
       
       // Update appointment with meeting link
       const { error: updateError } = await supabase
@@ -169,8 +169,8 @@ async function createCalendarReminder(appointment: any) {
   // This would integrate with your calendar system
   // For now, we'll just log the reminder creation
   console.log(`Creating calendar reminder for appointment ${appointment.appointment_id}`)
-  console.log(`Patient: ${appointment.user_details?.first_name} ${appointment.user_details?.last_name}`)
-  console.log(`Staff: ${appointment.staff?.first_name} ${appointment.staff?.last_name}`)
+  console.log(`Patient: ${appointment.patient?.full_name}`)
+  console.log(`Staff: ${appointment.staff?.full_name}`)
   console.log(`Meeting Date: ${appointment.meeting_date}`)
   console.log(`Content: ${appointment.content}`)
   
@@ -178,8 +178,26 @@ async function createCalendarReminder(appointment: any) {
   // This could be Google Calendar, Outlook, or any other calendar system
 }
 
-async function createGoogleMeetLink(appointment: any, credentials: any) {
+async function createGoogleMeetLink(appointment: any, credentials: any, supabase: any) {
   console.log(`Creating Google Meet link for appointment ${appointment.appointment_id}`)
+  
+  // Get emails from auth.users for both patient and staff
+  const [patientAuth, staffAuth] = await Promise.all([
+    supabase.auth.admin.getUserById(appointment.patient_id),
+    supabase.auth.admin.getUserById(appointment.staff_id)
+  ])
+
+  if (patientAuth.error || staffAuth.error) {
+    console.error('Error fetching user auth data:', patientAuth.error || staffAuth.error)
+    throw new Error('Failed to get user email addresses')
+  }
+
+  const patientEmail = patientAuth.data.user?.email
+  const staffEmail = staffAuth.data.user?.email
+
+  if (!patientEmail || !staffEmail) {
+    throw new Error('Missing email addresses for appointment participants')
+  }
   
   // Get access token
   const accessToken = await getAccessToken(credentials)
@@ -191,7 +209,7 @@ async function createGoogleMeetLink(appointment: any, credentials: any) {
   // Create calendar event with Google Meet
   const event = {
     summary: `Medical Appointment - ${appointment.content || 'Consultation'}`,
-    description: `Online medical consultation\nAppointment ID: ${appointment.appointment_id}`,
+    description: `Online medical consultation\nAppointment ID: ${appointment.appointment_id}\nPatient: ${appointment.patient?.full_name}\nStaff: ${appointment.staff?.full_name}`,
     start: {
       dateTime: meetingStart.toISOString(),
       timeZone: 'Asia/Ho_Chi_Minh',
@@ -201,8 +219,8 @@ async function createGoogleMeetLink(appointment: any, credentials: any) {
       timeZone: 'Asia/Ho_Chi_Minh',
     },
     attendees: [
-      { email: appointment.user_details?.email },
-      { email: appointment.staff?.email }
+      { email: patientEmail },
+      { email: staffEmail }
     ],
     conferenceData: {
       createRequest: {
