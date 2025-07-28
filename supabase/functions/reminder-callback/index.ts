@@ -13,7 +13,7 @@ serve(async (req) => {
   }
 
   try {
-    // Initialize Supabase client
+    // Initialize Supabase client with service role key (no JWT verification)
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -26,15 +26,22 @@ serve(async (req) => {
 
     if (!scheduleId || !token) {
       return new Response(
-        JSON.stringify({ error: 'Missing schedule_id or token' }),
+        `<!DOCTYPE html>
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h2>Invalid Request</h2>
+          <p>Missing required parameters. Please use the link from your email.</p>
+        </body>
+        </html>`,
         { 
           status: 400, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
         }
       )
     }
 
-    // Get the medicine schedule record to verify the token
+    // Get the medicine schedule record
     const { data: scheduleData, error: fetchError } = await supabaseClient
       .from('medicine_schedule')
       .select(`
@@ -56,15 +63,22 @@ serve(async (req) => {
 
     if (fetchError || !scheduleData) {
       return new Response(
-        JSON.stringify({ error: 'Invalid schedule ID' }),
+        `<!DOCTYPE html>
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h2>Schedule Not Found</h2>
+          <p>The medication schedule could not be found. Please check your email link.</p>
+        </body>
+        </html>`,
         { 
           status: 404, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
         }
       )
     }
 
-    // Verify the token (recreate the same hash used in the email generation)
+    // Verify the token (simple hash verification without JWT)
     const patientEmail = scheduleData.prescription.appointment_id.patient_id.user_id.email
     const expectedToken = await crypto.subtle.digest(
       'SHA-256',
@@ -77,10 +91,17 @@ serve(async (req) => {
 
     if (token !== expectedToken) {
       return new Response(
-        JSON.stringify({ error: 'Invalid or expired token' }),
+        `<!DOCTYPE html>
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h2>Invalid Token</h2>
+          <p>This link is invalid or has expired. Please use the latest email link.</p>
+        </body>
+        </html>`,
         { 
           status: 403, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
         }
       )
     }
@@ -116,7 +137,7 @@ serve(async (req) => {
         </head>
         <body>
           <div class="container">
-            <div class="success-icon">✅</div>
+            <div class="success-icon"></div>
             <h2>Medicine Already Marked as Taken</h2>
             <p>This medication has already been marked as taken. No further action is needed.</p>
             <p><strong>Thank you for staying on top of your medication schedule!</strong></p>
@@ -136,18 +157,24 @@ serve(async (req) => {
     const { error: updateError } = await supabaseClient
       .from('medicine_schedule')
       .update({ 
-        taken: true,
-        taken_at: new Date().toISOString()
+        taken: true
       })
       .eq('id', scheduleId)
 
     if (updateError) {
       console.error('Update error:', updateError)
       return new Response(
-        JSON.stringify({ error: 'Failed to update medicine schedule' }),
+        `<!DOCTYPE html>
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h2>Update Failed</h2>
+          <p>Failed to update your medication status. Please try again or contact support.</p>
+        </body>
+        </html>`,
         { 
           status: 500, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
         }
       )
     }
@@ -208,10 +235,17 @@ serve(async (req) => {
   } catch (error) {
     console.error('Function error:', error)
     return new Response(
-      JSON.stringify({ error: 'Internal server error' }),
+      `<!DOCTYPE html>
+      <html>
+      <head><title>Error</title></head>
+      <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+        <h2>Internal Error</h2>
+        <p>Something went wrong. Please try again or contact support.</p>
+      </body>
+      </html>`,
       { 
         status: 500, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
       }
     )
   }
