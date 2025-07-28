@@ -19,16 +19,14 @@ serve(async (req) => {
 
     console.log('Starting cron job execution...')
 
-    // Get current time and calculate time windows
+    // Get current time
     const now = new Date()
-    const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000)
-    const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000)
-
-    // 1. Handle 3-day reminders
-    await handleThreeDayReminders(supabase, now, threeDaysFromNow)
-
-    // 2. Handle Google Meet link creation (30 minutes before)
-    await handleMeetLinkCreation(supabase, now, thirtyMinutesFromNow)
+    
+    // Handle both tasks
+    await Promise.all([
+      handleGoogleMeetLinkCreation(supabase, now),
+      handleThreeDayCalendarReminders(supabase, now)
+    ])
 
     return new Response(
       JSON.stringify({ 
@@ -62,69 +60,13 @@ serve(async (req) => {
   }
 })
 
-async function handleThreeDayReminders(supabase: any, now: Date, threeDaysFromNow: Date) {
-  console.log('Checking for 3-day reminders...')
-  
-  // Get appointments that are 3 days away (within a 30-minute window)
-  const threeDaysAgo = new Date(threeDaysFromNow.getTime() - 30 * 60 * 1000)
-  
-  const { data: appointments, error } = await supabase
-    .from('appointment')
-    .select(`
-      appointment_id,
-      meeting_date,
-      content,
-      duration,
-      is_online,
-      patient_id,
-      staff_id,
-      patient:user_details!appointment_patient_id_fkey1(user_id, full_name),
-      staff:user_details!appointment_staff_id_fkey1(user_id, full_name)
-    `)
-    .gte('meeting_date', threeDaysAgo.toISOString())
-    .lte('meeting_date', threeDaysFromNow.toISOString())
-    .eq('status', 'confirmed')
-    .eq('is_visible', true)
-
-  if (error) {
-    console.error('Error fetching appointments for reminders:', error)
-    return
-  }
-
-  console.log(`Found ${appointments?.length || 0} appointments for 3-day reminders`)
-
-  // Create calendar events for each appointment
-  for (const appointment of appointments || []) {
-    try {
-      // Get Google Calendar tokens for both patient and staff
-      const [patientTokens, staffTokens] = await Promise.all([
-        getGoogleTokensForUser(supabase, appointment.patient_id),
-        getGoogleTokensForUser(supabase, appointment.staff_id)
-      ])
-
-      // Create reminder in patient's calendar
-      if (patientTokens) {
-        await createCalendarReminder(appointment, patientTokens, 'patient')
-      }
-
-      // Create reminder in staff's calendar  
-      if (staffTokens) {
-        await createCalendarReminder(appointment, staffTokens, 'staff')
-      }
-
-      console.log(`Created reminders for appointment ${appointment.appointment_id}`)
-    } catch (error) {
-      console.error(`Failed to create reminder for appointment ${appointment.appointment_id}:`, error)
-    }
-  }
-}
-
-async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFromNow: Date) {
+async function handleGoogleMeetLinkCreation(supabase: any, now: Date) {
   console.log('Checking for Google Meet link creation...')
   
-  // Get appointments that need Google Meet links (30 minutes before, online appointments only)
-  const thirtyMinutesAgo = new Date(thirtyMinutesFromNow.getTime() - 30 * 60 * 1000)
+  // Calculate 30 minutes from now
+  const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000)
   
+  // Get appointments that are 30 minutes away, online, scheduled, and don't have a meeting link
   const { data: appointments, error } = await supabase
     .from('appointment')
     .select(`
@@ -138,11 +80,12 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
       patient:user_details!appointment_patient_id_fkey1(user_id, full_name),
       staff:user_details!appointment_staff_id_fkey1(user_id, full_name)
     `)
-    .gte('meeting_date', thirtyMinutesAgo.toISOString())
-    .lte('meeting_date', thirtyMinutesFromNow.toISOString())
-    .eq('status', 'confirmed')
+    .eq('status', 'scheduled')
     .eq('is_online', true)
+    .eq('is_visible', true)
     .or('meeting_link.is.null,meeting_link.eq.')
+    .lte('meeting_date', thirtyMinutesFromNow.toISOString())
+    .gte('meeting_date', now.toISOString()) // Only future appointments
 
   if (error) {
     console.error('Error fetching appointments for Meet links:', error)
@@ -158,7 +101,7 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
       const staffTokens = await getGoogleTokensForUser(supabase, appointment.staff_id)
       
       if (!staffTokens) {
-        console.error(`No Google tokens found for staff ${appointment.staff_id}`)
+        console.error(`No valid Google tokens found for staff ${appointment.staff_id}`)
         continue
       }
 
@@ -181,102 +124,169 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
   }
 }
 
-async function getGoogleTokensForUser(supabase: any, userId: string) {
-  // Get Google OAuth tokens for a specific user - only if status is true
-  const { data: tokenData, error } = await supabase
-    .from('user_tokens')
-    .select('gg_access_token, gg_refresh_token, gg_token_status')
-    .eq('user_id', userId)
-    .eq('gg_token_status', true)
-    .single()
+async function handleThreeDayCalendarReminders(supabase: any, now: Date) {
+  console.log('Checking for 3-day calendar reminders...')
+  
+  // Calculate 3 days from now
+  const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000)
+  
+  // Get appointments that are exactly 3 days away (within 30 second window for cron precision)
+  const thirtySecondsAfter = new Date(threeDaysFromNow.getTime() + 30 * 1000)
+  const thirtySecondsBefore = new Date(threeDaysFromNow.getTime() - 30 * 1000)
+  
+  const { data: appointments, error } = await supabase
+    .from('appointment')
+    .select(`
+      appointment_id,
+      meeting_date,
+      content,
+      duration,
+      is_online,
+      patient_id,
+      staff_id,
+      patient:user_details!appointment_patient_id_fkey1(user_id, full_name),
+      staff:user_details!appointment_staff_id_fkey1(user_id, full_name)
+    `)
+    .eq('status', 'scheduled')
+    .eq('is_visible', true)
+    .gte('meeting_date', thirtySecondsBefore.toISOString())
+    .lte('meeting_date', thirtySecondsAfter.toISOString())
 
-  if (error || !tokenData) {
-    console.log(`No valid Google tokens found for user ${userId}`)
-    return null
+  if (error) {
+    console.error('Error fetching appointments for 3-day reminders:', error)
+    return
   }
 
-  if (!tokenData.gg_token_status) {
-    console.log(`Google tokens disabled for user ${userId}`)
-    return null
-  }
+  console.log(`Found ${appointments?.length || 0} appointments for 3-day reminders`)
 
-  // Try to use the access token, if it fails, try to refresh
-  try {
-    // Test if the access token is valid by making a simple API call
-    const testResponse = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary', {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${tokenData.gg_access_token}`,
-      },
-    })
+  // Create calendar reminders for each appointment
+  for (const appointment of appointments || []) {
+    try {
+      // Get Google Calendar tokens for both patient and staff
+      const [patientTokens, staffTokens] = await Promise.all([
+        getGoogleTokensForUser(supabase, appointment.patient_id),
+        getGoogleTokensForUser(supabase, appointment.staff_id)
+      ])
 
-    if (testResponse.ok) {
-      return {
-        access_token: tokenData.gg_access_token,
-        refresh_token: tokenData.gg_refresh_token
+      // Create reminder in patient's calendar
+      if (patientTokens) {
+        await createCalendarReminder(appointment, patientTokens, 'patient')
+        console.log(`Created calendar reminder for patient in appointment ${appointment.appointment_id}`)
       }
-    }
-  } catch (error) {
-    console.log(`Access token test failed for user ${userId}, attempting refresh...`)
-  }
 
-  // If access token test failed, try to refresh
+      // Create reminder in staff's calendar  
+      if (staffTokens) {
+        await createCalendarReminder(appointment, staffTokens, 'staff')
+        console.log(`Created calendar reminder for staff in appointment ${appointment.appointment_id}`)
+      }
+
+    } catch (error) {
+      console.error(`Failed to create calendar reminder for appointment ${appointment.appointment_id}:`, error)
+    }
+  }
+}
+
+async function getGoogleTokensForUser(supabase: any, userId: string) {
   try {
+    // Get Google OAuth tokens for a specific user - only if status is true
+    const { data: tokenData, error } = await supabase
+      .from('user_tokens')
+      .select('gg_access_token, gg_refresh_token, gg_token_status')
+      .eq('user_id', userId)
+      .eq('gg_token_status', true)
+      .single()
+
+    if (error || !tokenData) {
+      console.log(`No valid Google tokens found for user ${userId}`)
+      return null
+    }
+
+    if (!tokenData.gg_token_status) {
+      console.log(`Google tokens disabled for user ${userId}`)
+      return null
+    }
+
+    // Try to use the access token, if it fails, try to refresh
+    try {
+      // Test if the access token is valid by making a simple API call
+      const testResponse = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary', {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${tokenData.gg_access_token}`,
+        },
+      })
+
+      if (testResponse.ok) {
+        return {
+          access_token: tokenData.gg_access_token,
+          refresh_token: tokenData.gg_refresh_token
+        }
+      }
+    } catch (error) {
+      console.log(`Access token test failed for user ${userId}, attempting refresh...`)
+    }
+
+    // If access token test failed, try to refresh
     return await refreshAccessToken(supabase, userId, tokenData.gg_refresh_token)
+    
   } catch (error) {
-    console.error(`Failed to refresh token for user ${userId}:`, error)
-    // Mark token as invalid
-    await markTokenAsInvalid(supabase, userId)
+    console.error(`Error getting tokens for user ${userId}:`, error)
     return null
   }
 }
 
 async function refreshAccessToken(supabase: any, userId: string, refreshToken: string) {
-  const CLIENT_ID = Deno.env.get('GOOGLE_CLIENT_ID')!
-  const CLIENT_SECRET = Deno.env.get('GOOGLE_CLIENT_SECRET')!
-  
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token',
-    }),
-  })
-
-  if (!response.ok) {
-    const errorData = await response.text()
-    console.error(`Failed to refresh access token for user ${userId}: ${response.status} ${errorData}`)
+  try {
+    const CLIENT_ID = Deno.env.get('GOOGLE_CLIENT_ID')!
+    const CLIENT_SECRET = Deno.env.get('GOOGLE_CLIENT_SECRET')!
     
-    // Mark token as invalid if refresh fails
-    await markTokenAsInvalid(supabase, userId)
-    throw new Error(`Failed to refresh access token: ${response.status} ${errorData}`)
-  }
-
-  const tokenData = await response.json()
-
-  // Update tokens in database
-  const { error } = await supabase
-    .from('user_tokens')
-    .update({
-      gg_access_token: tokenData.access_token,
-      gg_token_status: true // Ensure it's marked as valid
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
     })
-    .eq('user_id', userId)
 
-  if (error) {
-    console.error('Failed to update refreshed tokens:', error)
-    throw new Error('Failed to update refreshed tokens in database')
-  }
+    if (!response.ok) {
+      const errorData = await response.text()
+      console.error(`Failed to refresh access token for user ${userId}: ${response.status} ${errorData}`)
+      
+      // Mark token as invalid if refresh fails
+      await markTokenAsInvalid(supabase, userId)
+      throw new Error(`Failed to refresh access token: ${response.status} ${errorData}`)
+    }
 
-  console.log(`Successfully refreshed access token for user ${userId}`)
-  return {
-    access_token: tokenData.access_token,
-    refresh_token: refreshToken
+    const tokenData = await response.json()
+
+    // Update tokens in database
+    const { error } = await supabase
+      .from('user_tokens')
+      .update({
+        gg_access_token: tokenData.access_token,
+        gg_token_status: true // Ensure it's marked as valid
+      })
+      .eq('user_id', userId)
+
+    if (error) {
+      console.error('Failed to update refreshed tokens:', error)
+      throw new Error('Failed to update refreshed tokens in database')
+    }
+
+    console.log(`Successfully refreshed access token for user ${userId}`)
+    return {
+      access_token: tokenData.access_token,
+      refresh_token: refreshToken
+    }
+  } catch (error) {
+    console.error(`Error refreshing token for user ${userId}:`, error)
+    await markTokenAsInvalid(supabase, userId)
+    throw error
   }
 }
 
@@ -303,7 +313,7 @@ async function createCalendarReminder(appointment: any, tokens: any, userType: s
 
   const event = {
     summary: `Reminder: Medical Appointment in 3 days`,
-    description: `You have a medical appointment scheduled for ${appointment.meeting_date}\n\nDetails:\n- Patient: ${appointment.patient?.full_name}\n- Staff: ${appointment.staff?.full_name}\n- Content: ${appointment.content}\n- Duration: ${appointment.duration} minutes\n- Type: ${appointment.is_online ? 'Online' : 'In-person'}`,
+    description: `You have a medical appointment scheduled for ${new Date(appointment.meeting_date).toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' })}\n\nDetails:\n- Patient: ${appointment.patient?.full_name}\n- Staff: ${appointment.staff?.full_name}\n- Content: ${appointment.content}\n- Duration: ${appointment.duration} minutes\n- Type: ${appointment.is_online ? 'Online' : 'In-person'}\n\nAppointment ID: ${appointment.appointment_id}`,
     start: {
       dateTime: reminderDate.toISOString(),
       timeZone: 'Asia/Ho_Chi_Minh',
@@ -366,7 +376,7 @@ async function createGoogleMeetLink(appointment: any, tokens: any, supabase: any
   // Create calendar event with Google Meet
   const event = {
     summary: `Medical Appointment - ${appointment.content || 'Consultation'}`,
-    description: `Online medical consultation\n\nAppointment ID: ${appointment.appointment_id}\nPatient: ${appointment.patient?.full_name}\nStaff: ${appointment.staff?.full_name}\n\nDuration: ${appointment.duration} minutes`,
+    description: `Online medical consultation\n\nAppointment ID: ${appointment.appointment_id}\nPatient: ${appointment.patient?.full_name}\nStaff: ${appointment.staff?.full_name}\n\nDuration: ${appointment.duration} minutes\n\nScheduled for: ${meetingStart.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' })}`,
     start: {
       dateTime: meetingStart.toISOString(),
       timeZone: 'Asia/Ho_Chi_Minh',
