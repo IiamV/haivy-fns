@@ -81,7 +81,7 @@ async function handleMeetingLinkInsertion(supabase, now) {
       .eq('status', 'scheduled')
       .eq('is_online', true)
       .eq('is_visible', true)
-      .is('meeting_link', null)
+      .or('meeting_link.is.null,meeting_link.eq.')
       .lte('meeting_date', thirtyMinutesFromNow.toISOString())
       .gte('meeting_date', now.toISOString());
     
@@ -122,7 +122,7 @@ async function handleMeetingLinkInsertion(supabase, now) {
     }
 
     const updatedCount = updatedAppointments?.length || 0;
-    console.log(`✓ Successfully updated ${updatedCount} appointments with meeting links`);
+    console.log(`Successfully updated ${updatedCount} appointments with meeting links`);
     
     return {
       appointmentsFound: appointments.length,
