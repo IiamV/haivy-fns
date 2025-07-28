@@ -41,15 +41,10 @@ serve(async (req) => {
       )
     }
 
-    // Get the medicine schedule record with a simpler query structure
+    // Get the medicine schedule record
     const { data: scheduleData, error: fetchError } = await supabaseClient
       .from('medicine_schedule')
-      .select(`
-        id,
-        date,
-        taken,
-        prescription
-      `)
+      .select('id, date, taken, prescription')
       .eq('id', scheduleId)
       .single()
 
@@ -72,64 +67,125 @@ serve(async (req) => {
       )
     }
 
-    // Get the patient email using the correct query structure
-    const { data: patientData, error: patientError } = await supabaseClient
-      .from('prescriptions')
-      .select(`
-        prescription_id,
-        appointment_id,
-        appointment (
-          appointment_id,
-          patient_id,
-          user_details!appointment_patient_id_fkey (
-            user_id,
-            users (
-              email
-            )
-          )
+    // Get patient email using the exact query structure you provided
+    const { data: patientEmailData, error: emailError } = await supabaseClient.rpc('exec_sql', {
+      sql: `
+        SELECT au.email 
+        FROM prescriptions pst 
+        JOIN appointment apt ON pst.appointment_id = apt.appointment_id
+        JOIN user_details ud ON apt.patient_id = ud.user_id
+        JOIN auth.users au ON ud.user_id = au.id
+        WHERE pst.prescription_id = $1
+      `,
+      params: [scheduleData.prescription]
+    })
+
+    // Alternative approach using regular Supabase queries if RPC doesn't work
+    if (emailError) {
+      console.log('RPC failed, trying alternative approach:', emailError)
+      
+      // Get prescription first
+      const { data: prescriptionData, error: prescError } = await supabaseClient
+        .from('prescriptions')
+        .select('prescription_id, appointment_id')
+        .eq('prescription_id', scheduleData.prescription)
+        .single()
+
+      if (prescError || !prescriptionData) {
+        console.error('Prescription error:', prescError)
+        return new Response(
+          `<!DOCTYPE html>
+          <html>
+          <head><title>Error</title></head>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2>Prescription Not Found</h2>
+            <p>Could not find prescription: ${scheduleData.prescription}</p>
+          </body>
+          </html>`,
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
         )
-      `)
-      .eq('prescription_id', scheduleData.prescription)
-      .single()
+      }
 
-    if (patientError || !patientData) {
-      console.error('Patient data fetch error:', patientError)
-      return new Response(
-        `<!DOCTYPE html>
-        <html>
-        <head><title>Error</title></head>
-        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-          <h2>Patient Information Not Found</h2>
-          <p>Could not retrieve patient information for verification.</p>
-          <p style="color: #666; font-size: 12px;">Prescription ID: ${scheduleData.prescription}</p>
-        </body>
-        </html>`,
-        { 
-          status: 404, 
-          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
-        }
-      )
-    }
+      // Get appointment
+      const { data: appointmentData, error: aptError } = await supabaseClient
+        .from('appointment')
+        .select('appointment_id, patient_id')
+        .eq('appointment_id', prescriptionData.appointment_id)
+        .single()
 
-    // Extract patient email
-    const patientEmail = patientData.appointment?.user_details?.users?.email
+      if (aptError || !appointmentData) {
+        console.error('Appointment error:', aptError)
+        return new Response(
+          `<!DOCTYPE html>
+          <html>
+          <head><title>Error</title></head>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2>Appointment Not Found</h2>
+            <p>Could not find appointment: ${prescriptionData.appointment_id}</p>
+          </body>
+          </html>`,
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        )
+      }
 
-    if (!patientEmail) {
-      console.error('Patient email not found in data:', JSON.stringify(patientData, null, 2))
-      return new Response(
-        `<!DOCTYPE html>
-        <html>
-        <head><title>Error</title></head>
-        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-          <h2>Patient Email Not Found</h2>
-          <p>Could not retrieve patient email for verification.</p>
-        </body>
-        </html>`,
-        { 
-          status: 404, 
-          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
-        }
-      )
+      // Get user details
+      const { data: userDetailsData, error: udError } = await supabaseClient
+        .from('user_details')
+        .select('user_id')
+        .eq('user_id', appointmentData.patient_id)
+        .single()
+
+      if (udError || !userDetailsData) {
+        console.error('User details error:', udError)
+        return new Response(
+          `<!DOCTYPE html>
+          <html>
+          <head><title>Error</title></head>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2>User Details Not Found</h2>
+            <p>Could not find user: ${appointmentData.patient_id}</p>
+          </body>
+          </html>`,
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        )
+      }
+
+      // Get user email from auth.users
+      const { data: authUserData, error: authError } = await supabaseClient.auth.admin.getUserById(userDetailsData.user_id)
+
+      if (authError || !authUserData.user || !authUserData.user.email) {
+        console.error('Auth user error:', authError)
+        return new Response(
+          `<!DOCTYPE html>
+          <html>
+          <head><title>Error</title></head>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2>User Email Not Found</h2>
+            <p>Could not find email for user: ${userDetailsData.user_id}</p>
+          </body>
+          </html>`,
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        )
+      }
+
+      var patientEmail = authUserData.user.email
+    } else {
+      // Use RPC result
+      if (!patientEmailData || patientEmailData.length === 0 || !patientEmailData[0].email) {
+        return new Response(
+          `<!DOCTYPE html>
+          <html>
+          <head><title>Error</title></head>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2>Patient Email Not Found</h2>
+            <p>Could not retrieve patient email for verification.</p>
+          </body>
+          </html>`,
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        )
+      }
+
+      var patientEmail = patientEmailData[0].email
     }
 
     // Verify the token (simple hash verification without JWT)
@@ -143,7 +199,7 @@ serve(async (req) => {
     )
 
     if (token !== expectedToken) {
-      console.error('Token mismatch. Expected:', expectedToken, 'Received:', token)
+      console.error('Token mismatch. Expected:', expectedToken, 'Received:', token, 'Email:', patientEmail)
       return new Response(
         `<!DOCTYPE html>
         <html>
