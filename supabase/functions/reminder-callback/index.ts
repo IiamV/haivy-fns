@@ -41,27 +41,20 @@ serve(async (req) => {
       )
     }
 
-    // Get the medicine schedule record
+    // Get the medicine schedule record with a simpler query structure
     const { data: scheduleData, error: fetchError } = await supabaseClient
       .from('medicine_schedule')
       .select(`
         id,
         date,
         taken,
-        prescription (
-          appointment_id (
-            patient_id (
-              user_id (
-                email
-              )
-            )
-          )
-        )
+        prescription
       `)
       .eq('id', scheduleId)
       .single()
 
     if (fetchError || !scheduleData) {
+      console.error('Schedule fetch error:', fetchError)
       return new Response(
         `<!DOCTYPE html>
         <html>
@@ -69,6 +62,60 @@ serve(async (req) => {
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
           <h2>Schedule Not Found</h2>
           <p>The medication schedule could not be found. Please check your email link.</p>
+          <p style="color: #666; font-size: 12px;">Schedule ID: ${scheduleId}</p>
+        </body>
+        </html>`,
+        { 
+          status: 404, 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+        }
+      )
+    }
+
+    // Now get the patient email through the prescription relationship
+    const { data: prescriptionData, error: prescriptionError } = await supabaseClient
+      .from('prescriptions')
+      .select(`
+        appointment_id (
+          patient_id (
+            user_id (
+              email
+            )
+          )
+        )
+      `)
+      .eq('prescription_id', scheduleData.prescription)
+      .single()
+
+    if (prescriptionError || !prescriptionData) {
+      console.error('Prescription fetch error:', prescriptionError)
+      return new Response(
+        `<!DOCTYPE html>
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h2>Patient Information Not Found</h2>
+          <p>Could not retrieve patient information for verification.</p>
+        </body>
+        </html>`,
+        { 
+          status: 404, 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+        }
+      )
+    }
+
+    // Extract patient email
+    const patientEmail = prescriptionData.appointment_id?.patient_id?.user_id?.email
+
+    if (!patientEmail) {
+      return new Response(
+        `<!DOCTYPE html>
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+          <h2>Patient Email Not Found</h2>
+          <p>Could not retrieve patient email for verification.</p>
         </body>
         </html>`,
         { 
@@ -79,7 +126,6 @@ serve(async (req) => {
     }
 
     // Verify the token (simple hash verification without JWT)
-    const patientEmail = scheduleData.prescription.appointment_id.patient_id.user_id.email
     const expectedToken = await crypto.subtle.digest(
       'SHA-256',
       new TextEncoder().encode(scheduleId + patientEmail + scheduleData.date)
@@ -90,6 +136,7 @@ serve(async (req) => {
     )
 
     if (token !== expectedToken) {
+      console.error('Token mismatch. Expected:', expectedToken, 'Received:', token)
       return new Response(
         `<!DOCTYPE html>
         <html>
@@ -217,7 +264,7 @@ serve(async (req) => {
       </head>
       <body>
         <div class="container">
-          <div class="success-icon celebration">🎉</div>
+          <div class="success-icon celebration"></div>
           <h2>Medicine Taken Successfully!</h2>
           <p>Your medication has been marked as taken. You will no longer receive reminder notifications for this dose.</p>
           <p><strong>Great job staying on track with your medication schedule!</strong></p>
@@ -241,6 +288,7 @@ serve(async (req) => {
       <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
         <h2>Internal Error</h2>
         <p>Something went wrong. Please try again or contact support.</p>
+        <p style="color: #666; font-size: 12px;">Error: ${error.message}</p>
       </body>
       </html>`,
       { 
@@ -249,4 +297,4 @@ serve(async (req) => {
       }
     )
   }
-});
+})
