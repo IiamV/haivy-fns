@@ -41,119 +41,98 @@ serve(async (req) => {
       )
     }
 
-    // Step 1: Get the medicine schedule
-    const { data: scheduleData, error: scheduleError } = await supabaseClient
+    // Get the medicine schedule record with a simpler query structure
+    const { data: scheduleData, error: fetchError } = await supabaseClient
       .from('medicine_schedule')
-      .select('id, date, taken, prescription')
+      .select(`
+        id,
+        date,
+        taken,
+        prescription
+      `)
       .eq('id', scheduleId)
       .single()
 
-    if (scheduleError || !scheduleData) {
-      console.error('Schedule error:', scheduleError)
+    if (fetchError || !scheduleData) {
+      console.error('Schedule fetch error:', fetchError)
       return new Response(
         `<!DOCTYPE html>
         <html>
         <head><title>Error</title></head>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
           <h2>Schedule Not Found</h2>
-          <p>Schedule ID: ${scheduleId}</p>
+          <p>The medication schedule could not be found. Please check your email link.</p>
+          <p style="color: #666; font-size: 12px;">Schedule ID: ${scheduleId}</p>
         </body>
         </html>`,
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        { 
+          status: 404, 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+        }
       )
     }
 
-    // Step 2: Get the prescription
-    const { data: prescriptionData, error: prescriptionError } = await supabaseClient
+    // Get the patient email using the correct query structure
+    const { data: patientData, error: patientError } = await supabaseClient
       .from('prescriptions')
-      .select('prescription_id, appointment_id')
+      .select(`
+        prescription_id,
+        appointment_id,
+        appointment (
+          appointment_id,
+          patient_id,
+          user_details!appointment_patient_id_fkey (
+            user_id,
+            users (
+              email
+            )
+          )
+        )
+      `)
       .eq('prescription_id', scheduleData.prescription)
       .single()
 
-    if (prescriptionError || !prescriptionData) {
-      console.error('Prescription error:', prescriptionError)
+    if (patientError || !patientData) {
+      console.error('Patient data fetch error:', patientError)
       return new Response(
         `<!DOCTYPE html>
         <html>
         <head><title>Error</title></head>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-          <h2>Prescription Not Found</h2>
-          <p>Could not find prescription: ${scheduleData.prescription}</p>
+          <h2>Patient Information Not Found</h2>
+          <p>Could not retrieve patient information for verification.</p>
+          <p style="color: #666; font-size: 12px;">Prescription ID: ${scheduleData.prescription}</p>
         </body>
         </html>`,
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        { 
+          status: 404, 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+        }
       )
     }
 
-    // Step 3: Get the appointment
-    const { data: appointmentData, error: appointmentError } = await supabaseClient
-      .from('appointment')
-      .select('appointment_id, patient_id')
-      .eq('appointment_id', prescriptionData.appointment_id)
-      .single()
+    // Extract patient email
+    const patientEmail = patientData.appointment?.user_details?.users?.email
 
-    if (appointmentError || !appointmentData) {
-      console.error('Appointment error:', appointmentError)
+    if (!patientEmail) {
+      console.error('Patient email not found in data:', JSON.stringify(patientData, null, 2))
       return new Response(
         `<!DOCTYPE html>
         <html>
         <head><title>Error</title></head>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-          <h2>Appointment Not Found</h2>
-          <p>Could not find appointment: ${prescriptionData.appointment_id}</p>
+          <h2>Patient Email Not Found</h2>
+          <p>Could not retrieve patient email for verification.</p>
         </body>
         </html>`,
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        { 
+          status: 404, 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+        }
       )
     }
 
-    // Step 4: Get the patient user details
-    const { data: userDetailsData, error: userDetailsError } = await supabaseClient
-      .from('user_details')
-      .select('user_id')
-      .eq('user_id', appointmentData.patient_id)
-      .single()
-
-    if (userDetailsError || !userDetailsData) {
-      console.error('User details error:', userDetailsError)
-      return new Response(
-        `<!DOCTYPE html>
-        <html>
-        <head><title>Error</title></head>
-        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-          <h2>User Details Not Found</h2>
-          <p>Could not find user details for patient: ${appointmentData.patient_id}</p>
-        </body>
-        </html>`,
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
-      )
-    }
-
-    // Step 5: Get the patient email from auth.users
-    const { data: authUserData, error: authUserError } = await supabaseClient
-      .from('users')
-      .select('email')
-      .eq('id', userDetailsData.user_id)
-      .single()
-
-    if (authUserError || !authUserData || !authUserData.email) {
-      console.error('Auth user error:', authUserError)
-      return new Response(
-        `<!DOCTYPE html>
-        <html>
-        <head><title>Error</title></head>
-        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-          <h2>User Email Not Found</h2>
-          <p>Could not find email for user: ${userDetailsData.user_id}</p>
-        </body>
-        </html>`,
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
-      )
-    }
-
-    const patientEmail = authUserData.email
-
-    // Verify the token
+    // Verify the token (simple hash verification without JWT)
     const expectedToken = await crypto.subtle.digest(
       'SHA-256',
       new TextEncoder().encode(scheduleId + patientEmail + scheduleData.date)
@@ -164,17 +143,20 @@ serve(async (req) => {
     )
 
     if (token !== expectedToken) {
-      console.error('Token mismatch for email:', patientEmail)
+      console.error('Token mismatch. Expected:', expectedToken, 'Received:', token)
       return new Response(
         `<!DOCTYPE html>
         <html>
         <head><title>Error</title></head>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
           <h2>Invalid Token</h2>
-          <p>This link is invalid or has expired.</p>
+          <p>This link is invalid or has expired. Please use the latest email link.</p>
         </body>
         </html>`,
-        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        { 
+          status: 403, 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+        }
       )
     }
 
@@ -211,8 +193,11 @@ serve(async (req) => {
           <div class="container">
             <div class="success-icon"></div>
             <h2>Medicine Already Marked as Taken</h2>
-            <p>This medication has already been marked as taken.</p>
+            <p>This medication has already been marked as taken. No further action is needed.</p>
             <p><strong>Thank you for staying on top of your medication schedule!</strong></p>
+            <p style="color: #666; font-size: 14px; margin-top: 30px;">
+              Haivy Health - Your Healthcare Partner
+            </p>
           </div>
         </body>
         </html>
@@ -225,7 +210,9 @@ serve(async (req) => {
     // Update the medicine schedule to mark as taken
     const { error: updateError } = await supabaseClient
       .from('medicine_schedule')
-      .update({ taken: true })
+      .update({ 
+        taken: true
+      })
       .eq('id', scheduleId)
 
     if (updateError) {
@@ -236,10 +223,13 @@ serve(async (req) => {
         <head><title>Error</title></head>
         <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
           <h2>Update Failed</h2>
-          <p>Failed to update your medication status.</p>
+          <p>Failed to update your medication status. Please try again or contact support.</p>
         </body>
         </html>`,
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+        { 
+          status: 500, 
+          headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+        }
       )
     }
 
@@ -283,8 +273,11 @@ serve(async (req) => {
         <div class="container">
           <div class="success-icon celebration"></div>
           <h2>Medicine Taken Successfully!</h2>
-          <p>Your medication has been marked as taken.</p>
+          <p>Your medication has been marked as taken. You will no longer receive reminder notifications for this dose.</p>
           <p><strong>Great job staying on track with your medication schedule!</strong></p>
+          <p style="color: #666; font-size: 14px; margin-top: 30px;">
+            Haivy Health - Your Healthcare Partner
+          </p>
         </div>
       </body>
       </html>
@@ -301,10 +294,14 @@ serve(async (req) => {
       <head><title>Error</title></head>
       <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
         <h2>Internal Error</h2>
-        <p>Something went wrong: ${error.message}</p>
+        <p>Something went wrong. Please try again or contact support.</p>
+        <p style="color: #666; font-size: 12px;">Error: ${error.message}</p>
       </body>
       </html>`,
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'text/html' } }
+      { 
+        status: 500, 
+        headers: { ...corsHeaders, 'Content-Type': 'text/html' } 
+      }
     )
   }
 })
