@@ -17,10 +17,9 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const supabase = createClient(supabaseUrl, supabaseKey)
 
-    // Google Calendar credentials from environment variables
-    const CLIENT_ID = Deno.env.get('GOOGLE_CLIENT_ID')!
-    const CLIENT_SECRET = Deno.env.get('GOOGLE_CLIENT_SECRET')!
-    const REFRESH_TOKEN = Deno.env.get('GOOGLE_REFRESH_TOKEN')!
+    // Google Service Account credentials from environment variables
+    const SERVICE_ACCOUNT_EMAIL = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_EMAIL')!
+    const SERVICE_ACCOUNT_PRIVATE_KEY = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY')!
 
     console.log('Starting cron job execution...')
 
@@ -34,9 +33,8 @@ serve(async (req) => {
 
     // 2. Handle Google Meet link creation (30 minutes before)
     await handleMeetLinkCreation(supabase, now, thirtyMinutesFromNow, {
-      CLIENT_ID,
-      CLIENT_SECRET,
-      REFRESH_TOKEN
+      SERVICE_ACCOUNT_EMAIL,
+      SERVICE_ACCOUNT_PRIVATE_KEY
     })
 
     return new Response(
@@ -168,11 +166,16 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
 }
 
 async function createCalendarReminder(appointment: any) {
+  // This would integrate with your calendar system
+  // For now, we'll just log the reminder creation
   console.log(`Creating calendar reminder for appointment ${appointment.appointment_id}`)
   console.log(`Patient: ${appointment.user_details?.first_name} ${appointment.user_details?.last_name}`)
   console.log(`Staff: ${appointment.staff?.first_name} ${appointment.staff?.last_name}`)
   console.log(`Meeting Date: ${appointment.meeting_date}`)
   console.log(`Content: ${appointment.content}`)
+  
+  // Here you would integrate with your calendar API to create the reminder
+  // This could be Google Calendar, Outlook, or any other calendar system
 }
 
 async function createGoogleMeetLink(appointment: any, credentials: any) {
@@ -235,18 +238,35 @@ async function createGoogleMeetLink(appointment: any, credentials: any) {
 }
 
 async function getAccessToken(credentials: any) {
-  const { CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN } = credentials
+  const { SERVICE_ACCOUNT_EMAIL, SERVICE_ACCOUNT_PRIVATE_KEY } = credentials
   
+  // Create JWT for service account authentication
+  const header = {
+    alg: 'RS256',
+    typ: 'JWT'
+  }
+  
+  const now = Math.floor(Date.now() / 1000)
+  const payload = {
+    iss: SERVICE_ACCOUNT_EMAIL,
+    scope: 'https://www.googleapis.com/auth/calendar.events',
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: now + 3600, // 1 hour expiration
+    iat: now
+  }
+  
+  // Create JWT token
+  const token = await createJWT(header, payload, SERVICE_ACCOUNT_PRIVATE_KEY)
+  
+  // Exchange JWT for access token
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      refresh_token: REFRESH_TOKEN,
-      grant_type: 'refresh_token',
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: token,
     }),
   })
 
@@ -257,4 +277,63 @@ async function getAccessToken(credentials: any) {
 
   const data = await response.json()
   return data.access_token
+}
+
+async function createJWT(header: any, payload: any, privateKey: string) {
+  const encoder = new TextEncoder()
+  
+  // Clean up the private key
+  const cleanPrivateKey = privateKey.replace(/\\n/g, '\n')
+  
+  // Base64url encode header and payload
+  const encodedHeader = base64UrlEncode(JSON.stringify(header))
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload))
+  
+  const message = `${encodedHeader}.${encodedPayload}`
+  
+  // Import the private key
+  const keyData = await crypto.subtle.importKey(
+    'pkcs8',
+    pemToArrayBuffer(cleanPrivateKey),
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      hash: 'SHA-256',
+    },
+    false,
+    ['sign']
+  )
+  
+  // Sign the message
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    keyData,
+    encoder.encode(message)
+  )
+  
+  const encodedSignature = base64UrlEncode(signature)
+  
+  return `${message}.${encodedSignature}`
+}
+
+function base64UrlEncode(data: string | ArrayBuffer): string {
+  let base64: string
+  if (typeof data === 'string') {
+    base64 = btoa(data)
+  } else {
+    const uint8Array = new Uint8Array(data)
+    base64 = btoa(String.fromCharCode(...uint8Array))
+  }
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+}
+
+function pemToArrayBuffer(pem: string): ArrayBuffer {
+  const pemHeader = '-----BEGIN PRIVATE KEY-----'
+  const pemFooter = '-----END PRIVATE KEY-----'
+  const pemContents = pem.replace(pemHeader, '').replace(pemFooter, '').replace(/\s/g, '')
+  const binaryString = atob(pemContents)
+  const bytes = new Uint8Array(binaryString.length)
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i)
+  }
+  return bytes.buffer
 }
