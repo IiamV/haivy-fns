@@ -17,10 +17,6 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const supabase = createClient(supabaseUrl, supabaseKey)
 
-    // Google Service Account credentials from environment variables
-    const SERVICE_ACCOUNT_EMAIL = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_EMAIL')!
-    const SERVICE_ACCOUNT_PRIVATE_KEY = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY')!
-
     console.log('Starting cron job execution...')
 
     // Get current time and calculate time windows
@@ -32,10 +28,7 @@ serve(async (req) => {
     await handleThreeDayReminders(supabase, now, threeDaysFromNow)
 
     // 2. Handle Google Meet link creation (30 minutes before)
-    await handleMeetLinkCreation(supabase, now, thirtyMinutesFromNow, {
-      SERVICE_ACCOUNT_EMAIL,
-      SERVICE_ACCOUNT_PRIVATE_KEY
-    })
+    await handleMeetLinkCreation(supabase, now, thirtyMinutesFromNow)
 
     return new Response(
       JSON.stringify({ 
@@ -103,15 +96,30 @@ async function handleThreeDayReminders(supabase: any, now: Date, threeDaysFromNo
   // Create calendar events for each appointment
   for (const appointment of appointments || []) {
     try {
-      await createCalendarReminder(appointment)
-      console.log(`Created reminder for appointment ${appointment.appointment_id}`)
+      // Get Google Calendar tokens for both patient and staff
+      const [patientTokens, staffTokens] = await Promise.all([
+        getGoogleTokensForUser(supabase, appointment.patient_id),
+        getGoogleTokensForUser(supabase, appointment.staff_id)
+      ])
+
+      // Create reminder in patient's calendar
+      if (patientTokens) {
+        await createCalendarReminder(appointment, patientTokens, 'patient')
+      }
+
+      // Create reminder in staff's calendar  
+      if (staffTokens) {
+        await createCalendarReminder(appointment, staffTokens, 'staff')
+      }
+
+      console.log(`Created reminders for appointment ${appointment.appointment_id}`)
     } catch (error) {
       console.error(`Failed to create reminder for appointment ${appointment.appointment_id}:`, error)
     }
   }
 }
 
-async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFromNow: Date, credentials: any) {
+async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFromNow: Date) {
   console.log('Checking for Google Meet link creation...')
   
   // Get appointments that need Google Meet links (30 minutes before, online appointments only)
@@ -146,7 +154,15 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
   // Create Google Meet links for each appointment
   for (const appointment of appointments || []) {
     try {
-      const meetLink = await createGoogleMeetLink(appointment, credentials, supabase)
+      // Use staff's calendar to create the meeting
+      const staffTokens = await getGoogleTokensForUser(supabase, appointment.staff_id)
+      
+      if (!staffTokens) {
+        console.error(`No Google tokens found for staff ${appointment.staff_id}`)
+        continue
+      }
+
+      const meetLink = await createGoogleMeetLink(appointment, staffTokens, supabase)
       
       // Update appointment with meeting link
       const { error: updateError } = await supabase
@@ -165,20 +181,120 @@ async function handleMeetLinkCreation(supabase: any, now: Date, thirtyMinutesFro
   }
 }
 
-async function createCalendarReminder(appointment: any) {
-  // This would integrate with your calendar system
-  // For now, we'll just log the reminder creation
-  console.log(`Creating calendar reminder for appointment ${appointment.appointment_id}`)
-  console.log(`Patient: ${appointment.patient?.full_name}`)
-  console.log(`Staff: ${appointment.staff?.full_name}`)
-  console.log(`Meeting Date: ${appointment.meeting_date}`)
-  console.log(`Content: ${appointment.content}`)
+async function getGoogleTokensForUser(supabase: any, userId: string) {
+  // Get Google OAuth tokens for a specific user
+  const { data: tokenData, error } = await supabase
+    .from('user_google_tokens')
+    .select('refresh_token, access_token, expires_at')
+    .eq('user_id', userId)
+    .single()
+
+  if (error || !tokenData) {
+    console.log(`No Google tokens found for user ${userId}`)
+    return null
+  }
+
+  // Check if access token is expired and refresh if needed
+  const now = new Date()
+  const expiresAt = new Date(tokenData.expires_at)
   
-  // Here you would integrate with your calendar API to create the reminder
-  // This could be Google Calendar, Outlook, or any other calendar system
+  if (now >= expiresAt) {
+    console.log(`Access token expired for user ${userId}, refreshing...`)
+    return await refreshAccessToken(supabase, userId, tokenData.refresh_token)
+  }
+
+  return tokenData
 }
 
-async function createGoogleMeetLink(appointment: any, credentials: any, supabase: any) {
+async function refreshAccessToken(supabase: any, userId: string, refreshToken: string) {
+  const CLIENT_ID = Deno.env.get('GOOGLE_CLIENT_ID')!
+  const CLIENT_SECRET = Deno.env.get('GOOGLE_CLIENT_SECRET')!
+  
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  })
+
+  if (!response.ok) {
+    const errorData = await response.text()
+    throw new Error(`Failed to refresh access token: ${response.status} ${errorData}`)
+  }
+
+  const tokenData = await response.json()
+  const expiresAt = new Date(Date.now() + tokenData.expires_in * 1000)
+
+  // Update tokens in database
+  const { error } = await supabase
+    .from('user_google_tokens')
+    .update({
+      access_token: tokenData.access_token,
+      expires_at: expiresAt.toISOString()
+    })
+    .eq('user_id', userId)
+
+  if (error) {
+    console.error('Failed to update refreshed tokens:', error)
+  }
+
+  return {
+    access_token: tokenData.access_token,
+    refresh_token: refreshToken,
+    expires_at: expiresAt.toISOString()
+  }
+}
+
+async function createCalendarReminder(appointment: any, tokens: any, userType: string) {
+  console.log(`Creating calendar reminder for ${userType} in appointment ${appointment.appointment_id}`)
+  
+  const reminderDate = new Date(appointment.meeting_date)
+  reminderDate.setDate(reminderDate.getDate() - 3) // 3 days before
+
+  const event = {
+    summary: `Reminder: Medical Appointment in 3 days`,
+    description: `You have a medical appointment scheduled for ${appointment.meeting_date}\n\nDetails:\n- Patient: ${appointment.patient?.full_name}\n- Staff: ${appointment.staff?.full_name}\n- Content: ${appointment.content}\n- Duration: ${appointment.duration} minutes\n- Type: ${appointment.is_online ? 'Online' : 'In-person'}`,
+    start: {
+      dateTime: reminderDate.toISOString(),
+      timeZone: 'Asia/Ho_Chi_Minh',
+    },
+    end: {
+      dateTime: new Date(reminderDate.getTime() + 15 * 60 * 1000).toISOString(), // 15 minute reminder
+      timeZone: 'Asia/Ho_Chi_Minh',
+    },
+    reminders: {
+      useDefault: false,
+      overrides: [
+        { method: 'email', minutes: 0 },
+        { method: 'popup', minutes: 0 }
+      ]
+    }
+  }
+
+  const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${tokens.access_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(event),
+  })
+
+  if (!response.ok) {
+    const errorData = await response.text()
+    throw new Error(`Failed to create calendar reminder: ${response.status} ${errorData}`)
+  }
+
+  console.log(`Created calendar reminder for ${userType}`)
+}
+
+async function createGoogleMeetLink(appointment: any, tokens: any, supabase: any) {
   console.log(`Creating Google Meet link for appointment ${appointment.appointment_id}`)
   
   // Get emails from auth.users for both patient and staff
@@ -199,9 +315,6 @@ async function createGoogleMeetLink(appointment: any, credentials: any, supabase
     throw new Error('Missing email addresses for appointment participants')
   }
   
-  // Get access token
-  const accessToken = await getAccessToken(credentials)
-  
   // Calculate meeting times
   const meetingStart = new Date(appointment.meeting_date)
   const meetingEnd = new Date(meetingStart.getTime() + appointment.duration * 60 * 1000)
@@ -209,7 +322,7 @@ async function createGoogleMeetLink(appointment: any, credentials: any, supabase
   // Create calendar event with Google Meet
   const event = {
     summary: `Medical Appointment - ${appointment.content || 'Consultation'}`,
-    description: `Online medical consultation\nAppointment ID: ${appointment.appointment_id}\nPatient: ${appointment.patient?.full_name}\nStaff: ${appointment.staff?.full_name}`,
+    description: `Online medical consultation\n\nAppointment ID: ${appointment.appointment_id}\nPatient: ${appointment.patient?.full_name}\nStaff: ${appointment.staff?.full_name}\n\nDuration: ${appointment.duration} minutes`,
     start: {
       dateTime: meetingStart.toISOString(),
       timeZone: 'Asia/Ho_Chi_Minh',
@@ -228,12 +341,19 @@ async function createGoogleMeetLink(appointment: any, credentials: any, supabase
         conferenceSolutionKey: { type: 'hangoutsMeet' },
       },
     },
+    reminders: {
+      useDefault: false,
+      overrides: [
+        { method: 'email', minutes: 30 },
+        { method: 'popup', minutes: 15 }
+      ]
+    }
   }
 
   const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?conferenceDataVersion=1&sendUpdates=all', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
+      'Authorization': `Bearer ${tokens.access_token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(event),
@@ -253,105 +373,4 @@ async function createGoogleMeetLink(appointment: any, credentials: any, supabase
 
   console.log(`Created Google Meet link: ${meetLink}`)
   return meetLink
-}
-
-async function getAccessToken(credentials: any) {
-  const { SERVICE_ACCOUNT_EMAIL, SERVICE_ACCOUNT_PRIVATE_KEY } = credentials
-  
-  // Create JWT for service account authentication
-  const header = {
-    alg: 'RS256',
-    typ: 'JWT'
-  }
-  
-  const now = Math.floor(Date.now() / 1000)
-  const payload = {
-    iss: SERVICE_ACCOUNT_EMAIL,
-    scope: 'https://www.googleapis.com/auth/calendar.events',
-    aud: 'https://oauth2.googleapis.com/token',
-    exp: now + 3600, // 1 hour expiration
-    iat: now
-  }
-  
-  // Create JWT token
-  const token = await createJWT(header, payload, SERVICE_ACCOUNT_PRIVATE_KEY)
-  
-  // Exchange JWT for access token
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion: token,
-    }),
-  })
-
-  if (!response.ok) {
-    const errorData = await response.text()
-    throw new Error(`Failed to get access token: ${response.status} ${errorData}`)
-  }
-
-  const data = await response.json()
-  return data.access_token
-}
-
-async function createJWT(header: any, payload: any, privateKey: string) {
-  const encoder = new TextEncoder()
-  
-  // Clean up the private key
-  const cleanPrivateKey = privateKey.replace(/\\n/g, '\n')
-  
-  // Base64url encode header and payload
-  const encodedHeader = base64UrlEncode(JSON.stringify(header))
-  const encodedPayload = base64UrlEncode(JSON.stringify(payload))
-  
-  const message = `${encodedHeader}.${encodedPayload}`
-  
-  // Import the private key
-  const keyData = await crypto.subtle.importKey(
-    'pkcs8',
-    pemToArrayBuffer(cleanPrivateKey),
-    {
-      name: 'RSASSA-PKCS1-v1_5',
-      hash: 'SHA-256',
-    },
-    false,
-    ['sign']
-  )
-  
-  // Sign the message
-  const signature = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
-    keyData,
-    encoder.encode(message)
-  )
-  
-  const encodedSignature = base64UrlEncode(signature)
-  
-  return `${message}.${encodedSignature}`
-}
-
-function base64UrlEncode(data: string | ArrayBuffer): string {
-  let base64: string
-  if (typeof data === 'string') {
-    base64 = btoa(data)
-  } else {
-    const uint8Array = new Uint8Array(data)
-    base64 = btoa(String.fromCharCode(...uint8Array))
-  }
-  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
-}
-
-function pemToArrayBuffer(pem: string): ArrayBuffer {
-  const pemHeader = '-----BEGIN PRIVATE KEY-----'
-  const pemFooter = '-----END PRIVATE KEY-----'
-  const pemContents = pem.replace(pemHeader, '').replace(pemFooter, '').replace(/\s/g, '')
-  const binaryString = atob(pemContents)
-  const bytes = new Uint8Array(binaryString.length)
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i)
-  }
-  return bytes.buffer
 }
